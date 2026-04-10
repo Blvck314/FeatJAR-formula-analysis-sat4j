@@ -6,18 +6,21 @@ import ca.pfv.spmf.algorithms.frequentpatterns.fpgrowth.AlgoFPGrowth;
 import de.featjar.analysis.IConfigurationTester;
 import de.featjar.analysis.sat4j.solver.ISelectionStrategy;
 import de.featjar.analysis.sat4j.solver.ModalImplicationGraph;
+import de.featjar.base.FeatJAR;
 import de.featjar.base.computation.Computations;
 import de.featjar.base.computation.Dependency;
 import de.featjar.base.computation.IComputation;
 import de.featjar.base.computation.Progress;
+import de.featjar.base.data.IntegerList;
 import de.featjar.base.data.Pair;
 import de.featjar.base.data.Result;
 import de.featjar.base.io.input.FileInputMapper;
+import de.featjar.base.log.Log;
 import de.featjar.formula.VariableMap;
 import de.featjar.formula.assignment.BooleanAssignment;
 import de.featjar.formula.assignment.BooleanAssignmentList;
+import de.featjar.formula.assignment.BooleanSolution;
 import de.featjar.formula.assignment.conversion.ComputeBooleanClauseList;
-import de.featjar.formula.combination.VariableCombinationSpecification;
 import de.featjar.formula.computation.ComputeCNFFormula;
 import de.featjar.formula.computation.ComputeNNFFormula;
 import de.featjar.formula.io.xml.XMLFeatureModelFormulaParser;
@@ -29,8 +32,6 @@ import java.io.IOException;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Duration;
-import java.time.temporal.TemporalUnit;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -68,8 +69,11 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
     }
 
     public static void main(String[] args) throws Exception {
+        FeatJAR.initialize();
         // Paths for configs, fm
-        Path configs = Path.of(System.getenv("HOME") + "/Documents/studium/Bachelorarbeit/");
+        Path configs = Path.of(
+                System.getenv("HOME") +
+                        "/Documents/studium/Bachelorarbeit/resources_featjar/".replace("/", File.separator));
         Path passingConfigFileName = Path.of("passingConfigs.txt");
         Path failingConfigFileName = Path.of("failingConfigs.txt");
         Path passingConfigsPath = Path.of(configs.toString(), passingConfigFileName.toString());
@@ -77,20 +81,21 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
 
         BufferedWriter passingConfigs = Files.newBufferedWriter(passingConfigsPath, Charset.defaultCharset());
         BufferedWriter failingConfigs = Files.newBufferedWriter(failingConfigsPath, Charset.defaultCharset());
-        String pathFromHome = "/Documents/studium/Bachelorarbeit/model.xml".replace('/', File.separatorChar);
+        String pathFromHome = "/Documents/studium/Bachelorarbeit/resources_featjar/muesli-model.xml".replace('/', File.separatorChar);
         Path modelPath = Path.of(System.getenv("HOME") + pathFromHome);
 
         // Parse feature model
         IComputation<BooleanAssignmentList> clauses = parseModel(modelPath);
 
         // Sample configs
-        BooleanAssignmentList sample = sample(clauses, 100);
-
+        BooleanAssignmentList sample = sample(clauses, 10);
         // Simulate faulty interactions
-        String interaction1 = "Purchase_value_scope269";
-        String interaction2 = "Shipping_address277";
-        int faultyInteractionInt1 = sample.getVariableMap().get(interaction1).get();
-        int faultyInteractionInt2 = sample.getVariableMap().get(interaction2).get();
+        //String interaction1 = "Purchase_value_scope269";
+        //String interaction2 = "Shipping_address277";
+        //int faultyInteractionInt1 = sample.getVariableMap().get(interaction1).get();
+        //int faultyInteractionInt2 = sample.getVariableMap().get(interaction2).get();
+        int faultyInteractionInt1 = 5;
+        int faultyInteractionInt2 = 7;
         int[] faultyInteraction1 = new int[]{faultyInteractionInt1};
         int[] faultyInteraction2 = new int[]{faultyInteractionInt2};
         TestManager tester = new TestManager();
@@ -128,8 +133,8 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         fpGrowth.setMaximumPatternLength(2);
 
         // Find frequent patterns in both classes
-        Itemsets passingItemsets = fpGrowth.runAlgorithm(String.valueOf(passingConfigsPath), null, 0.3);
-        Itemsets failingItemsets = fpGrowth.runAlgorithm(String.valueOf(failingConfigsPath), null, 0.3);
+        Itemsets passingItemsets = fpGrowth.runAlgorithm(String.valueOf(passingConfigsPath), null, 0);
+        Itemsets failingItemsets = fpGrowth.runAlgorithm(String.valueOf(failingConfigsPath), null, 0);
         // Get frequent patterns
         List<Itemset> passingPatterns = passingItemsets.getLevels().stream().flatMap(Collection::stream).collect(Collectors.toList());
         List<Itemset> failingPatterns =  failingItemsets.getLevels().stream().flatMap(Collection::stream).collect(Collectors.toList());
@@ -144,14 +149,37 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         infGrowthPatterns.sort(Comparator.comparing(p -> p.getFirst().get().length));
         // Get minimal patterns to simplify finding interactions
         List<BooleanAssignment> minimalPatterns = getMinimalPatterns(infGrowthPatterns);
-
-        // sample gezielt configs, die nach und nach idealerweise nur 1 minpattern enthalten, um sie zu reduzieren
-        for (BooleanAssignment minimalPattern : minimalPatterns) {
-
-        }
-        //growthRatePerPatterns.entrySet().forEach(System.out::println);
+        System.out.println("Minimal patterns: " + minimalPatterns.size());
         minimalPatterns.forEach(System.out::println);
 
+        List<BooleanAssignment> reducedMinimalPatterns = new ArrayList<>(minimalPatterns);
+        // sample gezielt configs, die nach und nach idealerweise nur 1 minpattern enthalten, um sie zu reduzieren
+        RandomConfigurationUpdater updater = new RandomConfigurationUpdater(sample, 1L);
+        for (BooleanAssignment minimalPattern : minimalPatterns) {
+            List<int[]> exclude = minimalPatterns.stream()
+                    .map(IntegerList::get).collect(Collectors.toList());
+            exclude.remove(minimalPattern.get());
+            List<int[]> include = new ArrayList<>(Collections.singleton(minimalPattern.get()));
+            Result<BooleanSolution> configRes = updater.complete(include, exclude, null);
+            if (configRes.isEmpty()){
+                System.out.println("No configuration found with included: ");
+                include.forEach(System.out::println);
+                System.out.println("Excluded: ");
+                exclude.forEach(System.out::println);
+                continue;
+            }
+            BooleanAssignment config = configRes.get();
+            System.out.println("Generated config: " + config.print());
+            boolean fails = tester.test(config).orElseThrow() == 1;
+            if (!fails) {
+                reducedMinimalPatterns.remove(minimalPattern);
+            }
+        }
+
+        System.out.println("Reduced minimal patterns: " + reducedMinimalPatterns.size());
+        reducedMinimalPatterns.forEach(System.out::println);
+
+        FeatJAR.deinitialize();
     }
 
     private static List<BooleanAssignment> getMinimalPatterns(ArrayList<Pair<BooleanAssignment, Double>> infGrowthPatterns) {
@@ -260,6 +288,7 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         BooleanAssignmentList sample = clauses.map(ComputeSolutionsSAT4J::new)
                 .set(ComputeSolutionsSAT4J.SELECTION_STRATEGY, ISelectionStrategy.NonParameterStrategy.FAST_RANDOM)
                 .set(ComputeSolutionsSAT4J.LIMIT, configAmount)
+                .set(ComputeSolutionsSAT4J.RANDOM_SEED, 1L)
                 .compute();
         return sample;
 
