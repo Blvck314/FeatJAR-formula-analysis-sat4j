@@ -51,7 +51,7 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
     private static TestManager tester;
     private static RandomConfigurationUpdater updater;
     private static BooleanAssignmentList sample;
-    private static BooleanAssignmentList clauses;
+    private static BooleanAssignmentList featureModel;
     private static BooleanAssignment coreFeatures;
     private static final String featureModelFile = "e-shop-model.xml";
     private static final String basePath = "/Documents/studium/Bachelorarbeit/".replace("/", File.separator);
@@ -83,11 +83,11 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         FeatJAR.initialize();
         // Paths for configs, fm
         Path modelPath = Path.of(System.getProperty("user.home"), basePath, resourcesFolder, featureModelFile);
-        clauses = parseModel(modelPath);
+        featureModel = parseModel(modelPath);
 
-        sample = sampleConfigs(clauses, 80);
+        sample = sampleConfigs(featureModel, 80);
         updater = new RandomConfigurationUpdater(sample, 2L);
-        coreFeatures = Computations.of(clauses)
+        coreFeatures = Computations.of(featureModel)
                 .map(ComputeCoreSAT4J::new).
                 get().orElseThrow().getFirst();
 
@@ -96,15 +96,19 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         String interaction1 = "Purchase_value_scope269";
         tester.addInteractionByName(interaction1);
 
-        String interaction2 = "Shipping_address277";
-        tester.addInteractionByName(interaction2);
+        //String interaction2 = "Shipping_address277";
+        //tester.addInteractionByName(interaction2);
 
         String[] interaction3 = new String[]{"City149", "Thumbnail68"};
         int city149, thumbnail68;
-        city149 = sample.getVariableMap().get(interaction3[0]).get();
-        thumbnail68 = sample.getVariableMap().get(interaction3[1]).get();
+        city149 = featureModel.getVariableMap().get(interaction3[0]).get();
+        thumbnail68 = featureModel.getVariableMap().get(interaction3[1]).get();
         int[] i3 = new int[]{city149, thumbnail68};
         tester.addInteractionByName(interaction3);
+
+        String interaction4 = "Welcome_message11";
+        int welcome_message11 = featureModel.getVariableMap().get(interaction4).get();
+        tester.addInteraction(- Math.abs(welcome_message11));
 
         // Test configs
         String configs = System.getProperty("user.home") + basePath + resourcesFolder;
@@ -124,46 +128,60 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         fpGrowth.setMaximumPatternLength(2);
 
         // Find frequent patterns in both classes
-        Itemsets passingItemsets = fpGrowth.runAlgorithm(String.valueOf(passingConfigsPath), null, 1.0 / passing);
-        Itemsets failingItemsets = fpGrowth.runAlgorithm(String.valueOf(failingConfigsPath), null, 2.0 / failing);
+        Itemsets frequentInteractionsInPassingConfigs = fpGrowth.runAlgorithm(String.valueOf(passingConfigsPath), null, 1.0 / passing);
+        Itemsets frequentInteractionsInFailingConfigs = fpGrowth.runAlgorithm(String.valueOf(failingConfigsPath), null, 3.0 / failing);
 
         // Get frequent patterns
-        List<Itemset> passingPatterns = passingItemsets.getLevels().stream().flatMap(Collection::stream).collect(Collectors.toList());
-        List<Itemset> failingPatterns =  failingItemsets.getLevels().stream().flatMap(Collection::stream).collect(Collectors.toList());
+        List<Itemset> frequentPassingInteractionList = frequentInteractionsInPassingConfigs.getLevels().stream().flatMap(Collection::stream).collect(Collectors.toList());
+        List<Itemset> frequentFailingInteractionList  =  frequentInteractionsInFailingConfigs .getLevels().stream().flatMap(Collection::stream).collect(Collectors.toList());
 
         // Convert Itemset lists to a HashMap BooleanAssigment -> Absolute support (Anzahl der Vorkommen)
-        HashMap<BooleanAssignment, Integer> passSuppPerPattern = transformPatterns(passingPatterns);
-        HashMap<BooleanAssignment, Integer> failSuppPerPattern = transformPatterns(failingPatterns);
+        HashMap<BooleanAssignment, Integer> supportPerInteractionPassingConfigs = transformPatterns(frequentPassingInteractionList);
+        HashMap<BooleanAssignment, Integer> supportPerInteractionFailingConfigs = transformPatterns(frequentFailingInteractionList );
 
 
         // Calculate growth rate per pattern
-        HashMap<BooleanAssignment, Double> growthRatePerPatterns =
-                computeGrowthRates(failSuppPerPattern, passSuppPerPattern, failing, passing);
-        System.out.println("Patterns found: " + growthRatePerPatterns.size());
+        HashMap<BooleanAssignment, Double> growthRatePerInteraction =
+                computeGrowthRates(supportPerInteractionFailingConfigs, supportPerInteractionPassingConfigs, failing, passing);
+        System.out.println("Patterns found: " + growthRatePerInteraction.size());
 
         // Filter infinite Growth rate patterns
-        ArrayList<Pair<BooleanAssignment, Double>> infGrowthPatterns = filterInfiniteGrowthRates(growthRatePerPatterns);
-        infGrowthPatterns.sort(Comparator.comparing(p -> p.getFirst().get().length));
+        ArrayList<Pair<BooleanAssignment, Double>> infGrowthRateInteractions = filterInfiniteGrowthRates(growthRatePerInteraction);
+        infGrowthRateInteractions.sort(Comparator.comparing(p -> p.getFirst().get().length));
 
 
         // Get minimal patterns to simplify finding interactions
-        List<BooleanAssignment> minimalPatterns = getMinimalPatterns(infGrowthPatterns);
-        System.out.println("Minimal patterns: " + minimalPatterns.size());
+        List<BooleanAssignment> minimalInteractions = getMinimalInteractions(infGrowthRateInteractions);
+        System.out.println("Minimal patterns: " + minimalInteractions.size());
 
         // Sample new config to further exclude more patterns
-        List<BooleanAssignment> reducedMinimalPatterns = reduceMinimalPatterns(minimalPatterns);
-        System.out.println("Reduced minimal patterns: " + reducedMinimalPatterns.size());
-        if (reducedMinimalPatterns.size() < 50) {
-            reducedMinimalPatterns.forEach(System.out::println);
+        //List<BooleanAssignment> reducedMinimalInteractions = reduceInteractions(minimalInteractions);
+        List<BooleanAssignment> reducedMinimalInteractions = reduceInteractionsInBatches(minimalInteractions, 3);
+        System.out.println("Reduced minimal patterns: " + reducedMinimalInteractions.size());
+        if (reducedMinimalInteractions.size() < 50) {
+            reducedMinimalInteractions.forEach(System.out::println);
+        }
+        System.out.println("------------------ Iteration 2 ------------------");
+        List<BooleanAssignment> reducedMinimalInteractions2 = reduceInteractionsInBatches(reducedMinimalInteractions, 3);
+        System.out.println("Reduced minimal patterns in iteration 2: " + reducedMinimalInteractions2.size());
+        if (reducedMinimalInteractions2.size() < 50) {
+            reducedMinimalInteractions2.forEach(System.out::println);
         }
 
+        writeInteractionsToFile(reducedMinimalInteractions2,"reducedPatterns.txt");
 
+        printResults(reducedMinimalInteractions2);
 
-        String filePath = System.getProperty("user.home") + basePath + resourcesFolder + "reducedPatterns.txt";
+        FeatJAR.deinitialize();
+        System.exit(0);
+
+    }
+
+    private static void writeInteractionsToFile(List<BooleanAssignment> reducedMinimalInteractions, String path) {
+        String filePath = System.getProperty("user.home") + basePath + resourcesFolder + path;
         int counter = 0;
         try (PrintWriter out = new PrintWriter(filePath)) {
-            out.println(coreFeatures);
-            for (BooleanAssignment pattern : reducedMinimalPatterns) {
+            for (BooleanAssignment pattern : reducedMinimalInteractions) {
                 out.println(pattern.print());
                 counter++;
             }
@@ -171,40 +189,108 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         } catch (FileNotFoundException e) {
             e.printStackTrace();
         }
+    }
 
-        System.exit(0);
-
-        // If interaction is not found in minimal patterns, do smth
-        Set<int[]> foundInteractions = new HashSet<>(tester.getInteractions().size());
-        for (BooleanAssignment foundInteraction : reducedMinimalPatterns){
-            for (int[] simulatedInteraction : tester.getInteractions()){
+    /**
+     * Prints which simulated interaction is contained or not contained in the List.
+     * @param reducedMinimalPatterns List of potential faulty interactions.
+     */
+    private static void printResults(List<BooleanAssignment> reducedMinimalPatterns) {
+        boolean foundAllInteractions = true;
+        for (int[] simulatedInteraction : tester.getInteractions()) {
+            boolean foundThisInteraction = false;
+            for (BooleanAssignment foundInteraction : reducedMinimalPatterns) {
                 if (foundInteraction.containsAll(simulatedInteraction)) {
-                    foundInteractions.add(simulatedInteraction);
+                    System.out.println("Interaction " + Arrays.toString(simulatedInteraction) + " in reduced minimal patterns.");
+                    foundThisInteraction = true;
+                    break;
                 }
             }
-        }
-        boolean foundAllInteractions = true;
-        for (var interaction : tester.getInteractions()){
-            if (!foundInteractions.contains(interaction)) {
-                System.out.println("Interaction " + Arrays.toString(interaction) + " not found in minimal patterns.");
+            if (!foundThisInteraction) {
+                System.out.println("Interaction " + Arrays.toString(simulatedInteraction) + " not found in reduced minimal patterns.");
                 foundAllInteractions = false;
             }
         }
-        if (foundAllInteractions) System.out.println("--------- All interactions found! ---------");
+        if (foundAllInteractions) {
+            System.out.println("--------- All interactions found! ---------");
+        }
+    }
 
-        FeatJAR.deinitialize();
+    /**
+     * This function samples new configs to test to further reduce potential interactions.
+     * It groups [batchsize]-many interactions and tries to sample a new config to test.
+     * If the config passes, the included interactions are removed from the potential interactions 
+     * @param interactions
+     * @param batchsize
+     * @return
+     */
+    static List<BooleanAssignment> reduceInteractionsInBatches(List<BooleanAssignment> interactions, int batchsize){
+        List<BooleanAssignment> reducedInteractions = new ArrayList<>(interactions);
+        if (batchsize < 1) throw new IllegalArgumentException("Batchsize has to be greater than 0.");
+
+        for (int i = 0; i < interactions.size(); i += batchsize) {
+            // Erstelle den aktuellen Batch
+            int end = Math.min(i + batchsize, interactions.size());
+            List<BooleanAssignment> currentBatch = interactions.subList(i, end);
+
+            // Include: Alle Patterns im aktuellen Batch
+            List<int[]> include = currentBatch.stream().map(IntegerList::get).collect(Collectors.toList());
+
+            // Exclude: Alle anderen minimalen Patterns
+            List<int[]> exclude = interactions.stream()
+                    .filter(p -> !currentBatch.contains(p))
+                    .map(IntegerList::get).collect(Collectors.toList());
+
+            // Versuche eine Config für den gesamten Batch zu samplen
+            Result<BooleanSolution> batchConfigRes = updater.complete(include, exclude, null);
+
+            if (batchConfigRes.isPresent()) {
+                BooleanAssignment config = batchConfigRes.get();
+                boolean fails = tester.test(config).orElseThrow() == 1;
+
+                if (!fails) {
+                    // Wir können ALLE Patterns in diesem Batch sicher als "nicht fehlerhaft" verwerfen.
+                    reducedInteractions.removeAll(currentBatch);
+                    continue;
+                }
+            }
+
+            // Wenn wir hier ankommen, gab es entweder ein FAIL (ein echter Bug ist im Batch)
+            // oder UNSAT (die Patterns im Batch können architektonisch nicht zusammen existieren).
+            // -> Fallback: Wir testen die Patterns dieses Batches einzeln.
+            for (BooleanAssignment singlePattern : currentBatch) {
+                List<int[]> singleInclude = new ArrayList<>(Collections.singleton(singlePattern.get()));
+
+                List<int[]> singleExclude = interactions.stream()
+                        .map(IntegerList::get).collect(Collectors.toList());
+                singleExclude.remove(singlePattern.get());
+
+                Result<BooleanSolution> singleConfigRes = updater.complete(singleInclude, singleExclude, null);
+
+                if (singleConfigRes.isEmpty()){
+                    continue;
+                }
+
+                BooleanAssignment singleConfig = singleConfigRes.get();
+                boolean singleFails = tester.test(singleConfig).orElseThrow() == 1;
+                if (!singleFails) {
+                    reducedInteractions.remove(singlePattern);
+                }
+            }
+        }
+        return reducedInteractions;
     }
 
     /**
      * This method reduces the minimal patterns by sampling new configs with exactly one minimal pattern included
      * and every other minimal pattern excluded to potentially exclude more non-faulty interactions.
+     *
      * @param minimalPatterns
      * @return
      */
-    private static List<BooleanAssignment> reduceMinimalPatterns(List<BooleanAssignment> minimalPatterns) {
+    private static List<BooleanAssignment> reduceInteractions(List<BooleanAssignment> minimalPatterns) {
         List<BooleanAssignment> reducedMinimalPatterns = new ArrayList<>(minimalPatterns);
         // sample configs, die gezielt nur ein pattern enthalten und teste, um evtl. mehr patters ausschließen zu können
-        // TODO mehr als eine interaktion includen, um evtl mehr patterns rauszufiltern
 
 
         for (BooleanAssignment minimalPattern : minimalPatterns) {
@@ -262,7 +348,7 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         }
     }
 
-    private static List<BooleanAssignment> getMinimalPatterns(List<Pair<BooleanAssignment, Double>> growthRatesPerPattern) {
+    private static List<BooleanAssignment> getMinimalInteractions(List<Pair<BooleanAssignment, Double>> growthRatesPerPattern) {
         List<BooleanAssignment> minimalPatterns = new ArrayList<>();
 
         for (Pair<BooleanAssignment, Double> pair : growthRatesPerPattern) {
@@ -432,6 +518,15 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
                 }
             }
             return sb.toString();
+        }
+
+        /**
+         *
+         * @param configuration
+         * @return True is the given configuration is failing.
+         */
+        public boolean isFailing(BooleanAssignment configuration){
+            return this.test(configuration).orElseThrow() == 1;
         }
     }
 }
