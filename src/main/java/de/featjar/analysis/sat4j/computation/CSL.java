@@ -20,6 +20,7 @@ import de.featjar.formula.assignment.BooleanAssignment;
 import de.featjar.formula.assignment.BooleanAssignmentList;
 import de.featjar.formula.assignment.BooleanSolution;
 import de.featjar.formula.assignment.conversion.ComputeBooleanClauseList;
+import de.featjar.formula.combination.VariableCombinationSpecification;
 import de.featjar.formula.computation.ComputeCNFFormula;
 import de.featjar.formula.computation.ComputeNNFFormula;
 import de.featjar.formula.io.xml.XMLFeatureModelFormulaParser;
@@ -86,8 +87,9 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         Path modelPath = Path.of(System.getProperty("user.home"), basePath, resourcesFolder, featureModelFile);
         featureModelClauses = parseModel(modelPath);
 
-        sample = sampleConfigs(featureModelClauses, 80);
-        updater = new RandomConfigurationUpdater(sample, 2L);
+        sample = sampleRandomConfigs(featureModelClauses, 2);
+        //sample = sampleTWise(featureModelClauses, 3, 80);
+        updater = new RandomConfigurationUpdater(featureModelClauses, 2L);
         coreFeatures = Computations.of(featureModelClauses)
                 .map(ComputeCoreSAT4J::new).
                 get().orElseThrow().getFirst();
@@ -119,17 +121,18 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         System.out.println(tester.printInteractions());
 
         // Run FPGrowth
+        int maxInteractionSize = 3;
         AlgoFPGrowth fpGrowthPassing = new AlgoFPGrowth();
         fpGrowthPassing.setMinimumPatternLength(1);
-        fpGrowthPassing.setMaximumPatternLength(2);
-        double minsupPassing = 1.0 / passing;
+        fpGrowthPassing.setMaximumPatternLength(maxInteractionSize);
+        double minsupPassing = passing > 0 ? 1.0 / passing : 0.0;
 
         //Itemsets frequentInteractionsInPassingConfigs = fpGrowthPassing.runAlgorithm(String.valueOf(passingConfigsPath), null, 1.0 / passing);
 
         AlgoFPGrowth fpGrowthFailing = new AlgoFPGrowth();
         fpGrowthFailing.setMinimumPatternLength(1);
-        fpGrowthFailing.setMaximumPatternLength(2);
-        double minsupFailing = 1.0 / failing;
+        fpGrowthFailing.setMaximumPatternLength(maxInteractionSize);
+        double minsupFailing = failing > 0 ? 1.0 / failing : 0.0;
         
         //Itemsets frequentInteractionsInFailingConfigs = fpGrowthFailing.runAlgorithm(String.valueOf(failingConfigsPath), null, 1.0 / failing);
         long fpGrowthTimestamp = System.currentTimeMillis();
@@ -170,32 +173,28 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         // Calculate growth rate per pattern
         HashMap<BooleanAssignment, Double> growthRatePerInteraction =
                 computeGrowthRates(supportPerInteractionFailingConfigs, supportPerInteractionPassingConfigs, failing, passing);
-        System.out.println("Patterns found: " + growthRatePerInteraction.size());
+        System.out.println("Interactions found: " + growthRatePerInteraction.size());
 
         // Filter infinite Growth rate patterns
         ArrayList<Pair<BooleanAssignment, Double>> infGrowthRateInteractions = filterInfiniteGrowthRates(growthRatePerInteraction);
         infGrowthRateInteractions.sort(Comparator.comparing(p -> p.getFirst().get().length));
-
+        System.out.println("Infinite Growth Interactions: " + infGrowthRateInteractions.size());
 
         // Get minimal patterns to simplify finding interactions
         List<BooleanAssignment> minimalInteractions = getMinimalInteractions(infGrowthRateInteractions);
-        System.out.println("Minimal patterns: " + minimalInteractions.size());
+        System.out.println("Minimal Interactions: " + minimalInteractions.size());
 
         // Sample new config to further exclude more patterns
         List<BooleanAssignment> reducedInteractions = minimalInteractions;
         long reducerTimestamp = System.currentTimeMillis();
-        //reducedInteractions = reduceDivideAndConquer(reducedInteractions, supportPerInteractionFailingConfigs, 50);
+        reducedInteractions =
+                reduceDivideAndConquer(reducedInteractions, supportPerInteractionFailingConfigs, 5);
+        reducedInteractions =
+                reduceInteractionsInBatchesIterative(
+                        reducedInteractions, supportPerInteractionFailingConfigs, 4, 5);
 
-        int iterations = 1; int oldsize = 0;
-        do {
-            oldsize = reducedInteractions.size();
-            reducedInteractions = reduceInteractionsInBatches(reducedInteractions, 4, supportPerInteractionFailingConfigs, 50);
-            System.out.printf("------------------- Iteration %d -------------------\n", iterations);
-            System.out.println("Reduced minimal patterns: " + reducedInteractions.size());
-            iterations++;
-        } while (reducedInteractions.size() < oldsize);
-
-        System.out.printf("Took %d ms to reduce patterns\n", System.currentTimeMillis() - reducerTimestamp);
+        System.out.printf("Took %d ms to reduce interactions\n", System.currentTimeMillis() - reducerTimestamp);
+        System.out.println("Reduced Interactions: " + reducedInteractions.size());
 
         writeInteractionsToFile(reducedInteractions,"reducedPatterns.txt");
         printResults(reducedInteractions);
@@ -204,13 +203,30 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         System.exit(0);
     }
 
+    private static List<BooleanAssignment> reduceInteractionsInBatchesIterative(
+            List<BooleanAssignment> reducedInteractions,
+            HashMap<BooleanAssignment, Integer> supportPerInteractionFailingConfigs,
+            int exclusionLimit,
+            int batchsize) {
+        int iterations = 1;
+        int oldsize = 0;
+        do {
+            oldsize = reducedInteractions.size();
+            reducedInteractions =
+                    reduceInteractionsInBatches(reducedInteractions, batchsize,
+                            supportPerInteractionFailingConfigs, exclusionLimit);
+            System.out.printf("------------------- Iteration %d -------------------\n", iterations);
+            System.out.println("Reduced minimal Interactions: " + reducedInteractions.size());
+            iterations++;
+        } while (reducedInteractions.size() < oldsize);
+        return reducedInteractions;
+    }
+
     private static void writeInteractionsToFile(List<BooleanAssignment> reducedMinimalInteractions, String path) {
         String filePath = System.getProperty("user.home") + basePath + resourcesFolder + path;
-        int counter = 0;
         try (PrintWriter out = new PrintWriter(filePath)) {
             for (BooleanAssignment pattern : reducedMinimalInteractions) {
                 out.println(pattern.print());
-                counter++;
             }
             out.flush();
         } catch (FileNotFoundException e) {
@@ -279,8 +295,6 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         int safeLimit = Math.min(exclusionLimit, sortedInteractions.size());
         List<BooleanAssignment> globalTopExcludes = sortedInteractions.subList(0, safeLimit);
 
-        System.out.println("Starte Divide and Conquer Rekursion...");
-
         // 3. Rekursion starten
         return ddminRecursive(sortedInteractions, globalTopExcludes);
     }
@@ -347,7 +361,6 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
             if (!fails) {
                 // JACKPOT! Der gesamte Block (egal ob 50 oder 2000 Patterns) ist fehlerfrei!
                 // O(log n) Pruning!
-                System.out.println("D&C Pruning: " + currentBlock.size() + " Patterns auf einmal eliminiert!");
                 return new ArrayList<>();
             }
         }
@@ -520,6 +533,7 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
                 // Only write non-core features, because they cannot be found as an error
                 StringBuilder sb = new StringBuilder();
                 for (int feature : configuration.get()) {
+                    if (feature == 0) continue;
                     if (!core.contains(Math.abs(feature))) {
                         sb.append(feature).append(" ");
                     }
@@ -625,9 +639,21 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         }
         return suppPerPattern;
     }
+    private static BooleanAssignmentList sampleTWise(BooleanAssignmentList fmClauses, int T, int configLimit) {
+        return Computations.of(fmClauses)
+                .map(YASA::new) // Prüfe hier ggf. deinen genauen Import-Pfad für YASA
+                .set(
+                        YASA.COMBINATION_SET,
+                        Computations.of(fmClauses)
+                                .map(VariableCombinationSpecification.VariableCombinationSpecificationComputation::new)
+                                .set(VariableCombinationSpecification.VariableCombinationSpecificationComputation.T, T)
+                )
+                .set(YASA.CONFIGURATION_LIMIT, configLimit)
+                .computeResult()
+                .orElseThrow();
+        }
 
-
-    private static BooleanAssignmentList sampleConfigs(BooleanAssignmentList clauses, int configAmount) {
+    private static BooleanAssignmentList sampleRandomConfigs(BooleanAssignmentList clauses, int configAmount) {
         return Computations.of(clauses)
                 .map(ComputeSolutionsSAT4J::new)
                 .set(ComputeSolutionsSAT4J.SELECTION_STRATEGY, ISelectionStrategy.NonParameterStrategy.FAST_RANDOM)
