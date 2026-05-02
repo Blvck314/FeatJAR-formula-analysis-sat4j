@@ -1,5 +1,9 @@
 package de.featjar.analysis.sat4j.computation;
 
+import ca.pfv.spmf.algorithms.frequentpatterns.apriori_fast.AlgoAprioriFAST;
+import ca.pfv.spmf.algorithms.frequentpatterns.apriori_simple.AlgoApriori;
+import ca.pfv.spmf.algorithms.frequentpatterns.eclat.AlgoEclat;
+import ca.pfv.spmf.input.transaction_database_list_integers.TransactionDatabase;
 import ca.pfv.spmf.patterns.itemset_array_integers_with_count.Itemset;
 import ca.pfv.spmf.patterns.itemset_array_integers_with_count.Itemsets;
 import ca.pfv.spmf.algorithms.frequentpatterns.fpgrowth.AlgoFPGrowth;
@@ -33,6 +37,7 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static de.featjar.base.computation.Computations.await;
 
@@ -56,7 +61,8 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
     private static BooleanAssignmentList featureModelClauses;
     private static BooleanAssignment coreFeatures;
     private static final String featureModelFile = "e-shop-model.xml";
-    private static final String basePath = "/Documents/studium/Bachelorarbeit/".replace("/", File.separator);
+    private static final String basePath =
+            System.getProperty("user.home") + "/Documents/studium/Bachelorarbeit/".replace("/", File.separator);
     private static final String resourcesFolder = "resources_featjar/".replace("/", File.separator);
     private static int passing = 0, failing = 0;
 
@@ -84,11 +90,16 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
     public static void main(String[] args) throws Exception {
         FeatJAR.initialize();
         // Paths for configs, fm
-        Path modelPath = Path.of(System.getProperty("user.home"), basePath, resourcesFolder, featureModelFile);
+        Path modelPath = Path.of(basePath, resourcesFolder, featureModelFile);
         featureModelClauses = parseModel(modelPath);
 
-        sample = sampleRandomConfigs(featureModelClauses, 2);
-        //sample = sampleTWise(featureModelClauses, 3, 80);
+        // Third parameter must be true for AlgoAprioriFAST
+        // This converts the mixture of positive and negative integers for feature representation to only positive
+        // -> This mapping has to be converted back to featjar standard after running apriori
+        boolean onlyPositiveInts = true;
+        int configAmount = 80;
+        sample = sampleRandomConfigs(featureModelClauses, configAmount);
+        //sample = sampleTWise(featureModelClauses, 3, configAmount);
         updater = new RandomConfigurationUpdater(featureModelClauses, 2L);
         coreFeatures = Computations.of(featureModelClauses)
                 .map(ComputeCoreSAT4J::new).
@@ -96,6 +107,9 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
 
         // Simulate faulty interactions
         tester = new TestManager();
+        //tester.addInteraction("Oats", "Apple");
+        //tester.addInteraction("Strawberrys", "Apple");
+
         String interaction1 = "Purchase_value_scope269";
         tester.addInteraction(interaction1);
 
@@ -109,65 +123,53 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         tester.addInteraction(interaction4);
 
         // Test configs
-        String configs = System.getProperty("user.home") + basePath + resourcesFolder;
+        String configs = basePath + resourcesFolder;
         Path passingConfigsPath = Path.of(configs, "passingConfigs.txt");
         Path failingConfigsPath = Path.of(configs, "failingConfigs.txt");
 
-        testSampledConfigs(passingConfigsPath, failingConfigsPath);
+        testSampledConfigs(passingConfigsPath, failingConfigsPath, onlyPositiveInts);
 
         System.out.println("Passing: " + passing);
         System.out.println("Failing: " + failing);
         System.out.println("Sample size: " + sample.size());
         System.out.println(tester.printInteractions());
 
-        // Run FPGrowth
-        int maxInteractionSize = 3;
-        AlgoFPGrowth fpGrowthPassing = new AlgoFPGrowth();
-        fpGrowthPassing.setMinimumPatternLength(1);
-        fpGrowthPassing.setMaximumPatternLength(maxInteractionSize);
-        double minsupPassing = passing > 0 ? 1.0 / passing : 0.0;
+        int maxInteractionSize = 2;
+        long patternMinerTimestamp = System.currentTimeMillis();
 
-        //Itemsets frequentInteractionsInPassingConfigs = fpGrowthPassing.runAlgorithm(String.valueOf(passingConfigsPath), null, 1.0 / passing);
+        //CompletableFuture<Itemsets> passingFuture = runFpGrowth(true, 1, maxInteractionSize);
+        //CompletableFuture<Itemsets> failingFuture = runFpGrowth(false, 1, maxInteractionSize);
 
-        AlgoFPGrowth fpGrowthFailing = new AlgoFPGrowth();
-        fpGrowthFailing.setMinimumPatternLength(1);
-        fpGrowthFailing.setMaximumPatternLength(maxInteractionSize);
-        double minsupFailing = failing > 0 ? 1.0 / failing : 0.0;
-        
-        //Itemsets frequentInteractionsInFailingConfigs = fpGrowthFailing.runAlgorithm(String.valueOf(failingConfigsPath), null, 1.0 / failing);
-        long fpGrowthTimestamp = System.currentTimeMillis();
-        // 2. Beide Prozesse asynchron und parallel starten
-        CompletableFuture<Itemsets> passingFuture = CompletableFuture.supplyAsync(() -> {
-            try {
-                return fpGrowthPassing.runAlgorithm(String.valueOf(passingConfigsPath), null, minsupPassing);
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        });
+        //CompletableFuture<Itemsets> passingFuture = runEclat(true, 1, maxInteractionSize);
+        //CompletableFuture<Itemsets> failingFuture = runEclat(false, 1, maxInteractionSize);
 
-        CompletableFuture<Itemsets> failingFuture = CompletableFuture.supplyAsync(() -> {
-            try {
-                return fpGrowthFailing.runAlgorithm(String.valueOf(failingConfigsPath), null, minsupFailing);
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        });
+        CompletableFuture<Itemsets> passingFuture = runAprioriFast(true, 1, maxInteractionSize);
+        CompletableFuture<Itemsets> failingFuture = runAprioriFast(false, 1, maxInteractionSize);
 
         CompletableFuture.allOf(passingFuture, failingFuture).join();
-        fpGrowthPassing.printStats();
-        fpGrowthFailing.printStats();
-        System.out.printf("Time for FP Growth execution: %d ms\n", System.currentTimeMillis() - fpGrowthTimestamp);
+        System.out.printf("Time for FP Growth execution: %d ms\n", System.currentTimeMillis() - patternMinerTimestamp);
 
         Itemsets frequentInteractionsInPassingConfigs = passingFuture.get();
         Itemsets frequentInteractionsInFailingConfigs = failingFuture.get();
 
         // Get frequent patterns
-        List<Itemset> frequentPassingInteractionList = frequentInteractionsInPassingConfigs.getLevels().stream().flatMap(Collection::stream).collect(Collectors.toList());
-        List<Itemset> frequentFailingInteractionList  =  frequentInteractionsInFailingConfigs .getLevels().stream().flatMap(Collection::stream).collect(Collectors.toList());
+        List<Itemset> frequentPassingInteractionList = frequentInteractionsInPassingConfigs.getLevels().stream()
+                .flatMap(Collection::stream)
+                //.filter(i -> i.itemset.length <= maxInteractionSize)
+                .collect(Collectors.toList());
+
+        List<Itemset> frequentFailingInteractionList  =  frequentInteractionsInFailingConfigs .getLevels().stream()
+                .flatMap(Collection::stream)
+                //.filter(i -> i.itemset.length <= maxInteractionSize)
+                .collect(Collectors.toList());
+
+
 
         // Convert Itemset lists to a HashMap BooleanAssigment -> Absolute support (Anzahl der Vorkommen)
-        HashMap<BooleanAssignment, Integer> supportPerInteractionPassingConfigs = transformPatterns(frequentPassingInteractionList);
-        HashMap<BooleanAssignment, Integer> supportPerInteractionFailingConfigs = transformPatterns(frequentFailingInteractionList );
+        HashMap<BooleanAssignment, Integer> supportPerInteractionPassingConfigs =
+                transformPatterns(frequentPassingInteractionList, onlyPositiveInts);
+        HashMap<BooleanAssignment, Integer> supportPerInteractionFailingConfigs =
+                transformPatterns(frequentFailingInteractionList, onlyPositiveInts);
 
 
         // Calculate growth rate per pattern
@@ -177,7 +179,7 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
 
         // Filter infinite Growth rate patterns
         ArrayList<Pair<BooleanAssignment, Double>> infGrowthRateInteractions = filterInfiniteGrowthRates(growthRatePerInteraction);
-        infGrowthRateInteractions.sort(Comparator.comparing(p -> p.getFirst().get().length));
+        infGrowthRateInteractions.sort(Comparator.comparing(p -> p.getFirst().get()[0]));
         System.out.println("Infinite Growth Interactions: " + infGrowthRateInteractions.size());
 
         // Get minimal patterns to simplify finding interactions
@@ -187,20 +189,132 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         // Sample new config to further exclude more patterns
         List<BooleanAssignment> reducedInteractions = minimalInteractions;
         long reducerTimestamp = System.currentTimeMillis();
-        reducedInteractions =
-                reduceDivideAndConquer(reducedInteractions, supportPerInteractionFailingConfigs, 5);
+        //reducedInteractions =
+        //        reduceDivideAndConquer(reducedInteractions, supportPerInteractionFailingConfigs, 3);
+        System.out.printf("Took %d ms to reduce interactions with divide and conquer\n", System.currentTimeMillis() - reducerTimestamp);
+        System.out.println("Reduced interactions after divide and conquer: " + reducedInteractions.size());
+
+        reducerTimestamp = System.currentTimeMillis();
         reducedInteractions =
                 reduceInteractionsInBatchesIterative(
-                        reducedInteractions, supportPerInteractionFailingConfigs, 4, 5);
-
-        System.out.printf("Took %d ms to reduce interactions\n", System.currentTimeMillis() - reducerTimestamp);
-        System.out.println("Reduced Interactions: " + reducedInteractions.size());
+                        reducedInteractions, supportPerInteractionFailingConfigs, 50, 4);
+        System.out.printf("Took %d ms to reduce interactions in batches\n", System.currentTimeMillis() - reducerTimestamp);
+        System.out.println("Reduced Interactions after iteratively batching: " + reducedInteractions.size());
 
         writeInteractionsToFile(reducedInteractions,"reducedPatterns.txt");
         printResults(reducedInteractions);
 
         FeatJAR.deinitialize();
         System.exit(0);
+    }
+
+    private static CompletableFuture<Itemsets> runAprioriFast(boolean passing, int occurrences, int maxInteractionSize){
+        int configs = passing ? CSL.passing : CSL.failing;
+        double minsup = (double) occurrences / configs;
+        String fileName = passing ? "passingConfigs.txt" : "failingConfigs.txt";
+        String path = basePath + resourcesFolder + fileName;
+
+        AlgoAprioriFAST apriori = new AlgoAprioriFAST();
+        apriori.setMaximumPatternLength(maxInteractionSize);
+        return CompletableFuture.supplyAsync(() -> {
+           try {
+               return apriori.runAlgorithm(minsup, path, null, 30);
+           } catch (IOException e) {
+               throw new RuntimeException(e);
+           } finally {
+               System.out.println("Stats for itemsets with passing = " + passing);
+               apriori.printStats();
+           }
+        });
+    }
+
+    private static CompletableFuture<Itemsets> runEclat(boolean passing, int occurrences, int maxInteractionSize){
+        int configs = passing ? CSL.passing : CSL.failing;
+        double minsup = (double) occurrences / configs;
+        String fileName = passing ? "passingConfigs.txt" : "failingConfigs.txt";
+        String path = basePath + resourcesFolder + fileName;
+
+        TransactionDatabase database = new TransactionDatabase();
+        try (BufferedReader reader = new BufferedReader(new FileReader(path))){
+            String line;
+            while ((line = reader.readLine()) != null){
+                String[] numbers = line.split(" ");
+                List<Integer> features =
+                        Arrays.stream(numbers).map(Integer::parseInt).collect(Collectors.toList());
+                database.addTransaction(features);
+            }
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+        AlgoEclat eclat = new AlgoEclat();
+        eclat.setMaximumPatternLength(maxInteractionSize);
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return eclat.runAlgorithm(null, database, minsup, false);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            } finally {
+                System.out.println("Stats for itemsets with passing = " + passing);
+                eclat.printStats();
+            }
+        });
+    }
+
+    private static CompletableFuture<Itemsets> runFpGrowth(boolean passing, int occurrences, int maxInteractionSize){
+        int configs = passing ? CSL.passing : CSL.failing;
+        double minsup = (double) occurrences / configs;
+        String fileName = passing ? "passingConfigs.txt" : "failingConfigs.txt";
+        String path = basePath + resourcesFolder + fileName;
+
+        AlgoFPGrowth fpGrowth = new AlgoFPGrowth();
+        fpGrowth.setMinimumPatternLength(1);
+        fpGrowth.setMaximumPatternLength(maxInteractionSize);
+
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return fpGrowth.runAlgorithm(path, null, minsup);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            } finally {
+                System.out.println("Stats for itemsets with passing = " + passing);
+                fpGrowth.printStats();
+            }
+        });
+
+    }
+
+    /**
+     * Maps (complete) feature sets / configs from the representation of only positive integers to the FearJAR
+     * representation with positive and negative integers for included and excluded features.
+     * @param features
+     * @param maxFeatureInt
+     * @return
+     */
+    private static int[] mapFeaturesToNegativeInts(int[] features, int maxFeatureInt){
+        return Arrays.stream(features).map(f -> {
+            if (f > maxFeatureInt + 1){
+                return -(Integer.MAX_VALUE - f);
+            }
+            return f;
+        }).toArray();
+    }
+
+    /**
+     * Maps (complete) feature sets / configs from the FeatJAR representation of positve and negative ints
+     * for inlcuded and excluded features to only positive integers for compatibility purposes with SPMF algorithms.
+     * @param features
+     * @return
+     */
+    private static int[] mapFeaturesToPositiveInts(int[] features){
+        return Arrays.stream(features).map(f -> {
+            if (f < 0) {
+                return Integer.MAX_VALUE - f;
+            }
+            return f;
+        }).toArray();
+
+
     }
 
     private static List<BooleanAssignment> reduceInteractionsInBatchesIterative(
@@ -215,15 +329,15 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
             reducedInteractions =
                     reduceInteractionsInBatches(reducedInteractions, batchsize,
                             supportPerInteractionFailingConfigs, exclusionLimit);
-            System.out.printf("------------------- Iteration %d -------------------\n", iterations);
-            System.out.println("Reduced minimal Interactions: " + reducedInteractions.size());
+            //System.out.printf("------------------- Iteration %d -------------------\n", iterations);
+            //System.out.println("Reduced minimal Interactions: " + reducedInteractions.size());
             iterations++;
         } while (reducedInteractions.size() < oldsize);
         return reducedInteractions;
     }
 
     private static void writeInteractionsToFile(List<BooleanAssignment> reducedMinimalInteractions, String path) {
-        String filePath = System.getProperty("user.home") + basePath + resourcesFolder + path;
+        String filePath = basePath + resourcesFolder + path;
         try (PrintWriter out = new PrintWriter(filePath)) {
             for (BooleanAssignment pattern : reducedMinimalInteractions) {
                 out.println(pattern.print());
@@ -368,8 +482,15 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         // --- DIVIDE (TEILEN) ---
         // Wenn der Block FAIL war (oder UNSAT), müssen wir ihn in zwei Hälften zerlegen.
         int mid = currentBlock.size() / 2;
-        List<BooleanAssignment> leftHalf = currentBlock.subList(0, mid);
-        List<BooleanAssignment> rightHalf = currentBlock.subList(mid, currentBlock.size());
+        List<BooleanAssignment> leftHalf = new ArrayList<>();//currentBlock.subList(0, mid);
+        List<BooleanAssignment> rightHalf = new ArrayList<>();//currentBlock.subList(mid, currentBlock.size());
+        for (int i = 0; i < currentBlock.size() - 1; i+=2) {
+            leftHalf.add(currentBlock.get(i));
+            rightHalf.add(currentBlock.get(i+1));
+        }
+        if (currentBlock.size() % 2 == 0){
+            leftHalf.add(currentBlock.getLast());
+        }
 
         // --- CONQUER (HERRSCHEN) ---
         List<BooleanAssignment> remainingFromLeft = ddminRecursive(leftHalf, globalTopExcludes);
@@ -518,7 +639,7 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         return reducedMinimalPatterns;
     }
 
-    private static void testSampledConfigs(Path passingConfigsPath, Path failingConfigsPath) {
+    private static void testSampledConfigs(Path passingConfigsPath, Path failingConfigsPath, boolean onlyPositiveInts) {
         try(
                 BufferedWriter passingConfigs = Files.newBufferedWriter(passingConfigsPath, Charset.defaultCharset());
                 BufferedWriter failingConfigs = Files.newBufferedWriter(failingConfigsPath, Charset.defaultCharset());
@@ -531,24 +652,27 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
                 boolean fails = tester.test(configuration).orElseThrow() == 1;
 
                 // Only write non-core features, because they cannot be found as an error
-                StringBuilder sb = new StringBuilder();
-                for (int feature : configuration.get()) {
-                    if (feature == 0) continue;
-                    if (!core.contains(Math.abs(feature))) {
-                        sb.append(feature).append(" ");
-                    }
-                }
-                String configStr = sb.toString();
+                int[] features = Arrays.stream(configuration.get())
+                        .filter(feature -> feature != 0)
+                        .filter(feature -> !core.contains(feature))
+                        .toArray();
+                // For algos like AlgoAprioriFAST
+                if (onlyPositiveInts)
+                    features = mapFeaturesToPositiveInts(features);
+
+                String configStr = Arrays.stream(features)
+                        .mapToObj(String::valueOf)
+                        .reduce("", (acc, f) -> acc + f + " ");
                 if (fails) {
                     failing++;
                     failingConfigs.write(configStr + "\n");
-                    failingConfigs.flush();
                 } else {
                     passing++;
                     passingConfigs.write(configStr + "\n");
-                    passingConfigs.flush();
                 }
             }
+            passingConfigs.flush();
+            failingConfigs.flush();
         } catch (IOException e) {
             System.out.println(e.getMessage());
             throw new RuntimeException(e);
@@ -630,10 +754,18 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
     /**
      * Transforms patterns from a list of itemsets to a map mapping a boolean assignment to it's corresponding support value
      * @param patterns
+     * @param fromOnlyPositive Has to be true, if the features were mapped to only positive ints prior
      * @return
      */
-    private static HashMap<BooleanAssignment, Integer> transformPatterns(List<Itemset> patterns) {
+    private static HashMap<BooleanAssignment, Integer> transformPatterns(List<Itemset> patterns, boolean fromOnlyPositive) {
         HashMap<BooleanAssignment, Integer> suppPerPattern = new HashMap<>(patterns.size());
+        if (fromOnlyPositive){
+            int maxFeatureInt = sample.getVariableMap().size();
+            for (Itemset itemset : patterns){
+                suppPerPattern.put(new BooleanAssignment(mapFeaturesToNegativeInts(itemset.itemset, maxFeatureInt)), itemset.getAbsoluteSupport());
+            }
+            return suppPerPattern;
+        }
         for (Itemset itemset : patterns) {
             suppPerPattern.put(new BooleanAssignment(itemset.itemset), itemset.getAbsoluteSupport());
         }
