@@ -1,7 +1,6 @@
 package de.featjar.analysis.sat4j.computation;
 
 import ca.pfv.spmf.algorithms.frequentpatterns.apriori_fast.AlgoAprioriFAST;
-import ca.pfv.spmf.algorithms.frequentpatterns.apriori_simple.AlgoApriori;
 import ca.pfv.spmf.algorithms.frequentpatterns.eclat.AlgoEclat;
 import ca.pfv.spmf.input.transaction_database_list_integers.TransactionDatabase;
 import ca.pfv.spmf.patterns.itemset_array_integers_with_count.Itemset;
@@ -36,8 +35,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static de.featjar.base.computation.Computations.await;
 
@@ -58,13 +58,15 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
     private static TestManager tester;
     private static RandomConfigurationUpdater updater;
     private static BooleanAssignmentList sample;
-    private static BooleanAssignmentList featureModelClauses;
+    private static IFormula featureModelFormula;
+    private static BooleanAssignmentList featureModelCNF;
     private static BooleanAssignment coreFeatures;
-    private static final String featureModelFile = "e-shop-model.xml";
+    private static final String featureModelFile = "muesli-model.xml";
     private static final String basePath =
             System.getProperty("user.home") + "/Documents/studium/Bachelorarbeit/".replace("/", File.separator);
     private static final String resourcesFolder = "resources_featjar/".replace("/", File.separator);
     private static int passing = 0, failing = 0;
+    private static final AtomicBoolean statsPrinted = new AtomicBoolean(false);
 
     public CSL(IComputation<BooleanAssignmentList> booleanClauseList, Object... computations) {
         super(
@@ -91,25 +93,38 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         FeatJAR.initialize();
         // Paths for configs, fm
         Path modelPath = Path.of(basePath, resourcesFolder, featureModelFile);
-        featureModelClauses = parseModel(modelPath);
+        featureModelFormula = parseModel(modelPath);
+        featureModelCNF = Computations.async(featureModelFormula)
+                .map(ComputeNNFFormula::new)
+                .map(ComputeCNFFormula::new)
+                .map(ComputeBooleanClauseList::new)
+                .computeResult().orElseThrow();
+
+        coreFeatures = Computations.async(featureModelCNF)
+                .map(ComputeCoreSAT4J::new)
+                .computeResult().orElseThrow().getFirst();
 
         // Third parameter must be true for AlgoAprioriFAST
         // This converts the mixture of positive and negative integers for feature representation to only positive
         // -> This mapping has to be converted back to featjar standard after running apriori
         boolean onlyPositiveInts = true;
-        int configAmount = 80;
-        sample = sampleRandomConfigs(featureModelClauses, configAmount);
+        int configAmount = 20;
+        sample = sampleRandomConfigs(featureModelCNF, configAmount);
         //sample = sampleTWise(featureModelClauses, 3, configAmount);
-        updater = new RandomConfigurationUpdater(featureModelClauses, 2L);
-        coreFeatures = Computations.of(featureModelClauses)
-                .map(ComputeCoreSAT4J::new).
-                get().orElseThrow().getFirst();
+        updater = new RandomConfigurationUpdater(featureModelCNF, 2L);
 
         // Simulate faulty interactions
-        tester = new TestManager();
-        //tester.addInteraction("Oats", "Apple");
-        //tester.addInteraction("Strawberrys", "Apple");
-
+        tester = new TestManager(123L, featureModelCNF, updater, coreFeatures);
+        tester.simulateInteraction(TestManager.InteractionType.OR, true, false);
+        tester.printInteractions();
+       // tester.addInteraction("Oats");
+       // tester.addInteraction("Apple");
+       // tester.addInteraction("Strawberrys");
+       // tester.addInteraction("Oats", "Apple");
+       // int strawberrys = sample.getVariableMap().get("Strawberrys").orElseThrow();
+       // int apple = sample.getVariableMap().get("Apple").orElseThrow();
+       // tester.addInteraction(strawberrys, -apple);
+        /*
         String interaction1 = "Purchase_value_scope269";
         tester.addInteraction(interaction1);
 
@@ -122,6 +137,8 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         String[] interaction4 = new String[]{"City149", "Welcome_message11"};
         tester.addInteraction(interaction4);
 
+         */
+
         // Test configs
         String configs = basePath + resourcesFolder;
         Path passingConfigsPath = Path.of(configs, "passingConfigs.txt");
@@ -132,7 +149,7 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         System.out.println("Passing: " + passing);
         System.out.println("Failing: " + failing);
         System.out.println("Sample size: " + sample.size());
-        System.out.println(tester.printInteractions());
+        tester.printInteractions();
 
         int maxInteractionSize = 2;
         long patternMinerTimestamp = System.currentTimeMillis();
@@ -147,7 +164,7 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         CompletableFuture<Itemsets> failingFuture = runAprioriFast(false, 1, maxInteractionSize);
 
         CompletableFuture.allOf(passingFuture, failingFuture).join();
-        System.out.printf("Time for FP Growth execution: %d ms\n", System.currentTimeMillis() - patternMinerTimestamp);
+        System.out.printf("Time for Association Rule Mining execution: %d ms\n", System.currentTimeMillis() - patternMinerTimestamp);
 
         Itemsets frequentInteractionsInPassingConfigs = passingFuture.get();
         Itemsets frequentInteractionsInFailingConfigs = failingFuture.get();
@@ -155,14 +172,11 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         // Get frequent patterns
         List<Itemset> frequentPassingInteractionList = frequentInteractionsInPassingConfigs.getLevels().stream()
                 .flatMap(Collection::stream)
-                //.filter(i -> i.itemset.length <= maxInteractionSize)
                 .collect(Collectors.toList());
 
         List<Itemset> frequentFailingInteractionList  =  frequentInteractionsInFailingConfigs .getLevels().stream()
                 .flatMap(Collection::stream)
-                //.filter(i -> i.itemset.length <= maxInteractionSize)
                 .collect(Collectors.toList());
-
 
 
         // Convert Itemset lists to a HashMap BooleanAssigment -> Absolute support (Anzahl der Vorkommen)
@@ -178,26 +192,35 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         System.out.println("Interactions found: " + growthRatePerInteraction.size());
 
         // Filter infinite Growth rate patterns
-        ArrayList<Pair<BooleanAssignment, Double>> infGrowthRateInteractions = filterInfiniteGrowthRates(growthRatePerInteraction);
-        infGrowthRateInteractions.sort(Comparator.comparing(p -> p.getFirst().get()[0]));
-        System.out.println("Infinite Growth Interactions: " + infGrowthRateInteractions.size());
+        ArrayList<Pair<BooleanAssignment, Double>> filteredInteractions = filterInteractionsConsideringGrowthRate(growthRatePerInteraction);
+        filteredInteractions.sort(Comparator.comparing(p -> p.getFirst().get()[0]));
+        System.out.println("Infinite Growth Interactions: " + filteredInteractions.size());
+
 
         // Get minimal patterns to simplify finding interactions
-        List<BooleanAssignment> minimalInteractions = getMinimalInteractions(infGrowthRateInteractions);
-        System.out.println("Minimal Interactions: " + minimalInteractions.size());
+        List<BooleanAssignment> minimalInteractions =
+        //        filteredInteractions.stream()
+        //        .map(Pair::getFirst)
+        //        .collect(Collectors.toList());
+        getMinimalInteractions(filteredInteractions);
+        //System.out.println("Minimal Interactions: " + minimalInteractions.size());
 
         // Sample new config to further exclude more patterns
         List<BooleanAssignment> reducedInteractions = minimalInteractions;
         long reducerTimestamp = System.currentTimeMillis();
-        //reducedInteractions =
-        //        reduceDivideAndConquer(reducedInteractions, supportPerInteractionFailingConfigs, 3);
+        reducedInteractions =
+                reduceDivideAndConquer(reducedInteractions, supportPerInteractionFailingConfigs, 0);
         System.out.printf("Took %d ms to reduce interactions with divide and conquer\n", System.currentTimeMillis() - reducerTimestamp);
         System.out.println("Reduced interactions after divide and conquer: " + reducedInteractions.size());
 
         reducerTimestamp = System.currentTimeMillis();
         reducedInteractions =
                 reduceInteractionsInBatchesIterative(
-                        reducedInteractions, supportPerInteractionFailingConfigs, 50, 4);
+                        reducedInteractions, supportPerInteractionFailingConfigs, 0, 1);
+        System.out.println("Reduced Interactions after first iterative batching: " + reducedInteractions.size());
+        reducedInteractions =
+                reduceInteractionsInBatchesIterative(
+                        reducedInteractions, supportPerInteractionFailingConfigs, 0, 1);
         System.out.printf("Took %d ms to reduce interactions in batches\n", System.currentTimeMillis() - reducerTimestamp);
         System.out.println("Reduced Interactions after iteratively batching: " + reducedInteractions.size());
 
@@ -222,8 +245,10 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
            } catch (IOException e) {
                throw new RuntimeException(e);
            } finally {
-               System.out.println("Stats for itemsets with passing = " + passing);
-               apriori.printStats();
+               synchronized (System.out){
+                   System.out.println("Stats for itemsets with passing = " + passing);
+                   apriori.printStats();
+               }
            }
         });
     }
@@ -309,7 +334,7 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
     private static int[] mapFeaturesToPositiveInts(int[] features){
         return Arrays.stream(features).map(f -> {
             if (f < 0) {
-                return Integer.MAX_VALUE - f;
+                return Integer.MAX_VALUE + f;
             }
             return f;
         }).toArray();
@@ -338,9 +363,20 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
 
     private static void writeInteractionsToFile(List<BooleanAssignment> reducedMinimalInteractions, String path) {
         String filePath = basePath + resourcesFolder + path;
+        VariableMap variableMap = sample.getVariableMap();
         try (PrintWriter out = new PrintWriter(filePath)) {
             for (BooleanAssignment pattern : reducedMinimalInteractions) {
-                out.println(pattern.print());
+                out.print(pattern.print());
+                out.print("   ");
+                for (int feature : pattern.get()){
+                    String sFeature = variableMap.get(Math.abs(feature)).orElseThrow();
+                    if (feature < 0){
+                        out.printf("not-%s ", sFeature);
+                    } else {
+                        out.printf("%s ", sFeature);
+                    }
+                }
+                out.println();
             }
             out.flush();
         } catch (FileNotFoundException e) {
@@ -482,8 +518,9 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         // --- DIVIDE (TEILEN) ---
         // Wenn der Block FAIL war (oder UNSAT), müssen wir ihn in zwei Hälften zerlegen.
         int mid = currentBlock.size() / 2;
-        List<BooleanAssignment> leftHalf = new ArrayList<>();//currentBlock.subList(0, mid);
-        List<BooleanAssignment> rightHalf = new ArrayList<>();//currentBlock.subList(mid, currentBlock.size());
+        List<BooleanAssignment> leftHalf = currentBlock.subList(0, mid); //new ArrayList<>();//
+        List<BooleanAssignment> rightHalf = currentBlock.subList(mid, currentBlock.size()); // new ArrayList<>();//
+        /*
         for (int i = 0; i < currentBlock.size() - 1; i+=2) {
             leftHalf.add(currentBlock.get(i));
             rightHalf.add(currentBlock.get(i+1));
@@ -491,6 +528,8 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         if (currentBlock.size() % 2 == 0){
             leftHalf.add(currentBlock.getLast());
         }
+
+         */
 
         // --- CONQUER (HERRSCHEN) ---
         List<BooleanAssignment> remainingFromLeft = ddminRecursive(leftHalf, globalTopExcludes);
@@ -534,7 +573,6 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
      * @throws IllegalArgumentException if {@code batchsize} is less than 1.
      */
 
-    // WICHTIG: Signatur anpassen! Du musst die failSupportMap aus der main() übergeben.
     private static List<BooleanAssignment> reduceInteractionsInBatches(
         List<BooleanAssignment> interactions,
         int batchsize,
@@ -679,15 +717,23 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         }
     }
 
+    /**
+     * Filters the given interactions so that there is no interaction which has an interaction which is a superset.
+     * @param growthRatesPerPattern
+     * @return
+     */
     private static List<BooleanAssignment> getMinimalInteractions(List<Pair<BooleanAssignment, Double>> growthRatesPerPattern) {
         List<BooleanAssignment> minimalPatterns = new ArrayList<>();
+        growthRatesPerPattern.sort(
+                Comparator.comparingInt(o -> o.getFirst().size())
+        );
 
         for (Pair<BooleanAssignment, Double> pair : growthRatesPerPattern) {
             BooleanAssignment pattern = pair.getFirst();
 
             boolean isSuperSet = false;
             for (BooleanAssignment minimalPattern : minimalPatterns) {
-                if (superset(pattern.get(), minimalPattern.get())){
+                if (isSuperset(pattern.get(), minimalPattern.get())){
                     isSuperSet = true;
                     break;
                 }
@@ -699,7 +745,13 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         return minimalPatterns;
     }
 
-    private static boolean superset(int[] superSet, int[] subSet) {
+    /**
+     *
+     * @param superSet
+     * @param subSet
+     * @return True, if superset is a superset of subset.
+     */
+    private static boolean isSuperset(int[] superSet, int[] subSet) {
         for (int item : subSet) {
             boolean contains = false;
             for (int subItem : superSet) {
@@ -713,7 +765,9 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         return true;
     }
 
-    private static ArrayList<Pair<BooleanAssignment, Double>> filterInfiniteGrowthRates(HashMap<BooleanAssignment, Double> growthRatePerPatterns) {
+    private static ArrayList<Pair<BooleanAssignment, Double>> filterInteractionsConsideringGrowthRate(
+            HashMap<BooleanAssignment, Double> growthRatePerPatterns) {
+            //Function<SampleMetrics, Double> metricFunction) {
         return growthRatePerPatterns.entrySet().stream()
                 .filter(e -> e.getValue() == Double.POSITIVE_INFINITY)
                 .map(e -> new Pair<>(e.getKey(), e.getValue()))
@@ -762,7 +816,11 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         if (fromOnlyPositive){
             int maxFeatureInt = sample.getVariableMap().size();
             for (Itemset itemset : patterns){
-                suppPerPattern.put(new BooleanAssignment(mapFeaturesToNegativeInts(itemset.itemset, maxFeatureInt)), itemset.getAbsoluteSupport());
+                suppPerPattern.put(
+                        new BooleanAssignment(
+                            mapFeaturesToNegativeInts(itemset.itemset, maxFeatureInt)
+                        ),
+                        itemset.getAbsoluteSupport());
             }
             return suppPerPattern;
         }
@@ -771,9 +829,10 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         }
         return suppPerPattern;
     }
+
     private static BooleanAssignmentList sampleTWise(BooleanAssignmentList fmClauses, int T, int configLimit) {
         return Computations.of(fmClauses)
-                .map(YASA::new) // Prüfe hier ggf. deinen genauen Import-Pfad für YASA
+                .map(YASA::new)
                 .set(
                         YASA.COMBINATION_SET,
                         Computations.of(fmClauses)
@@ -794,23 +853,127 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
                 .compute();
     }
 
-    private static BooleanAssignmentList parseModel(Path modelPath) throws IOException {
+    private static IFormula parseModel(Path modelPath) throws IOException {
         XMLFeatureModelFormulaParser parser = new XMLFeatureModelFormulaParser();
-        IFormula model = parser.parse(new FileInputMapper(modelPath, Charset.defaultCharset()))
-                .orElseThrow();
-        return Computations.async(model)
-                .map(ComputeNNFFormula::new)
-                .map(ComputeCNFFormula::new)
-                .map(ComputeBooleanClauseList::new)
-                .computeResult().orElseThrow();
+        return parser.parse(new FileInputMapper(modelPath, Charset.defaultCharset())).orElseThrow();
     }
 
     private static final class TestManager implements IConfigurationTester {
 
-        private final ArrayList<int[]> faultyInteractions;
+        public enum InteractionType {
+            AND, OR, XOR, IMPLIES, EQUIV
+        }
 
-        public TestManager() {
-            this.faultyInteractions = new  ArrayList<>();
+        private final Set<int[]> faultyInteractions;
+        private final Random random;
+        private final List<Integer> eligibleFeatures;
+        private final RandomConfigurationUpdater updater;
+
+        public TestManager(long seed, BooleanAssignmentList featureModelCNF, RandomConfigurationUpdater updater, BooleanAssignment coreFeatures) {
+            this.faultyInteractions = new HashSet<>();
+            this.random = new Random(seed);
+            this.updater = updater;
+            this.eligibleFeatures = featureModelCNF.getVariableMap().getIndices().stream()
+                    .filter(feature -> !coreFeatures.contains(Math.abs(feature)))
+                    .collect(Collectors.toList());
+
+        }
+
+        /**
+         * Simuliert eine Fehlerinteraktion.
+         * @param type     Der logische Typ (AND, XOR, etc.)
+         * @param includes Array, das steuert, ob Features positiv oder negativ (not) vorkommen sollen.
+         * @return true, wenn erfolgreich eine valide Kombination gefunden wurde.
+         */
+        public boolean simulateInteraction(InteractionType type, boolean... includes) {
+            int t = includes.length;
+            if (eligibleFeatures.size() < t) {
+                throw new IllegalArgumentException("Nicht genügend freie Features für Interaktionsgröße " + t);
+            }
+
+            int maxAttempts = 1000;
+            for (int attempt = 0; attempt < maxAttempts; attempt++) {
+                // 1. Ziehe t zufällige Features
+                Collections.shuffle(eligibleFeatures, random);
+
+                // 2. Wende die gewünschten Vorzeichen (includes) an
+                int[] literals = new int[t];
+                for (int i = 0; i < t; i++) {
+                    int feature = eligibleFeatures.get(i);
+                    literals[i] = includes[i] ? feature : -feature;
+                }
+
+                List<int[]> dnf = buildDNF(type, literals);
+
+                // 4. Prüfe mit dem SAT-Solver (updater), ob diese Fehler-Konstellation
+                if (isSatisfiable(dnf)) {
+                    faultyInteractions.addAll(dnf);
+                    System.out.printf("Took %d attempts to simulate %s-Interaction.\n", attempt, type);
+                    return true;
+                }
+            }
+            throw new RuntimeException("Konnte nach " + maxAttempts + " Versuchen keine erfüllbare Interaktion generieren.");
+        }
+
+        /**
+         * Baut die Disjunktive Normalform für beliebige Vorzeichen-Arrays.
+         */
+        private List<int[]> buildDNF(InteractionType type, int[] lit) {
+            List<int[]> dnf = new ArrayList<>();
+            System.out.printf("Building %s-Interaction for %s.\n", type.toString(), Arrays.toString(lit));
+            switch (type) {
+                case AND: {
+                    dnf.add(lit.clone());
+                    break;
+                }
+                case OR: {
+                    for (int l : lit) dnf.add(new int[]{l});
+                    dnf.add(lit.clone());
+                    break;
+                }
+                case XOR: {
+                    if (lit.length != 2) throw new IllegalArgumentException("XOR momentan nur für t=2");
+                    // (L1 AND NOT L2) OR (NOT L1 AND L2)
+                    dnf.add(new int[]{lit[0], -lit[1]});
+                    dnf.add(new int[]{-lit[0], lit[1]});
+                    break;
+                }
+                case IMPLIES: {
+                    if (lit.length != 2) throw new IllegalArgumentException("IMPLIES momentan nur für t=2");
+                    // L1 => L2 = (NOT L1) OR L2
+                    dnf.add(new int[]{-lit[0]});
+                    dnf.add(new int[]{lit[1]});
+                    break;
+                }
+                case EQUIV: {
+                    if (lit.length != 2) throw new IllegalArgumentException("EQUIV momentan nur für t=2");
+                    // (L1 AND L2) OR (NOT L1 AND NOT L2)
+                    dnf.add(new int[]{lit[0], lit[1]});
+                    dnf.add(new int[]{-lit[0], -lit[1]});
+                    break;
+                }
+            }
+            return dnf;
+        }
+
+        private boolean isSatisfiable(List<int[]> dnf) {
+            // WICHTIG: Wir fordern, dass JEDER Teilstrang der DNF im Feature-Modell möglich ist.
+            // Sonst hätten wir z.B. ein XOR, das in der Praxis nur als normales AND agiert,
+            // weil der andere XOR-Zweig vom Feature-Modell ohnehin verboten wird (Dead Code).
+            for (int[] clause : dnf) {
+                List<int[]> includeList = new ArrayList<>(Collections.singletonList(clause));
+                Result<BooleanSolution> result = this.updater.complete(includeList, null, null);
+                if (result.isEmpty()) return false;
+            }
+            return true;
+        }
+
+        public boolean contains(BooleanAssignment interaction){
+            for (int[] interactionArr : this.faultyInteractions){
+                if (interaction.containsAll(interactionArr))
+                    return true;
+            }
+            return false;
         }
 
         public boolean addInteraction(int... faultyInteraction) {
@@ -834,7 +997,7 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
             return addInteraction(faultyInteraction);
         }
 
-        public List<int[]> getInteractions() {
+        public Set<int[]> getInteractions() {
             return faultyInteractions;
         }
 
@@ -859,16 +1022,16 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
             return Result.of(testResult ? 1 : 0);
         }
 
-        public String printInteractions(){
+        public void printInteractions(){
             StringBuilder sb = new StringBuilder();
             sb.append("Interactions: ");
-            for (int[] faultyInteraction : faultyInteractions) {
-                sb.append(Arrays.toString(faultyInteraction));
-                if (faultyInteractions.indexOf(faultyInteraction) != faultyInteractions.size() - 1) {
+            for (Iterator<int[]> it = faultyInteractions.iterator(); it.hasNext();) {
+                sb.append(Arrays.toString(it.next()));
+
+                if (it.hasNext())
                     sb.append(" or ");
-                }
             }
-            return sb.toString();
+            System.out.println(sb);
         }
 
         /**
@@ -878,6 +1041,39 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
          */
         public boolean isFailing(BooleanAssignment configuration){
             return this.test(configuration).orElseThrow() == 1;
+        }
+    }
+
+
+    private static final class SampleMetrics {
+        private int passingConfigs = 0;
+        private int failingConfigs = 0;
+        private final HashMap<BooleanAssignment, Integer> supportPerPassingInteraction;
+        private final HashMap<BooleanAssignment, Integer> supportPerFailingInteraction;
+
+        public SampleMetrics(HashMap<BooleanAssignment, Integer> supportPerPassingInteraction,
+                            HashMap<BooleanAssignment, Integer> supportPerFailingInteraction,
+                            int failingConfigs, int passingConfigs) {
+            this.supportPerPassingInteraction = new HashMap<>(supportPerPassingInteraction);
+            this.supportPerFailingInteraction = new HashMap<>(supportPerFailingInteraction);
+            this.failingConfigs = failingConfigs;
+            this.passingConfigs = passingConfigs;
+        }
+
+        public int getPassingConfigs() {
+            return passingConfigs;
+        }
+
+        public int getFailingConfigs() {
+            return failingConfigs;
+        }
+
+        public HashMap<BooleanAssignment, Integer> getSupportPerPassingInteraction() {
+            return supportPerPassingInteraction;
+        }
+
+        public HashMap<BooleanAssignment, Integer> getSupportPerFailingInteraction() {
+            return supportPerFailingInteraction;
         }
     }
 }
