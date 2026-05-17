@@ -18,25 +18,25 @@ import java.util.Optional;
 
 public class CSLCommand extends ASAT4JAnalysisCommand<BooleanAssignmentList> {
 
-    public static final Option<Path> FAILING_CONFIGS_OPTION = Option.newOption("f", Option.PathParser)
+    public final Option<Path> FAILING_CONFIGS_OPTION = Option.newOption("f", Option.PathParser)
             .setDescription("Set of failing initial configurations.")
             .setDefaultValue(null)
             .setValidator(Option.PathValidator);
 
-    public static final Option<Path> PASSING_CONFIGS_OPTION = Option.newOption("p", Option.PathParser)
+    public final Option<Path> PASSING_CONFIGS_OPTION = Option.newOption("p", Option.PathParser)
             .setDescription("Set of passing initial configurations.")
             .setDefaultValue(null)
             .setValidator(Option.PathValidator);
 
-    public static final Option<Double> MINSUPP_OPTION = Option.newOption("s", Option.DoubleParser)
+    public final Option<Double> MINSUPP_OPTION = Option.newOption("s", Option.DoubleParser)
             .setDescription("Minimal support threshold for each pattern.")
             .setDefaultValue(0.01);
 
-    public static final Option<Double> MINCONF_OPTION = Option.newOption("c", Option.DoubleParser)
+    public final Option<Double> MINCONF_OPTION = Option.newOption("c", Option.DoubleParser)
             .setDescription("Minimal confidence threshold for each pattern.")
             .setDefaultValue(0.01);
 
-    public static final Option<Integer> T_OPTION = Option.newOption("t", Option.IntegerParser)
+    public final Option<Integer> T_OPTION = Option.newOption("t", Option.IntegerParser)
             .setDescription("Maximum interaction size t.")
             .setDefaultValue(2);
 
@@ -45,8 +45,9 @@ public class CSLCommand extends ASAT4JAnalysisCommand<BooleanAssignmentList> {
     @Override
     protected IComputation<BooleanAssignmentList> newAnalysis(
             OptionList optionParser, IComputation<BooleanAssignmentList> formula) {
+        /*
         IComputation<BooleanAssignmentList> analysis = formula.map(CSL::new)
-                .set(CSL.RANDOM_SEED, optionParser.get(RANDOM_SEED_OPTION))
+                .set(this.RANDOM_SEED, optionParser.get(RANDOM_SEED_OPTION))
                 .set(CSL.MINSUPP, optionParser.get(MINSUPP_OPTION))
                 .set(CSL.MINCONF, optionParser.get(MINCONF_OPTION))
                 .set(CSL.T,  optionParser.get(T_OPTION));
@@ -67,6 +68,9 @@ public class CSLCommand extends ASAT4JAnalysisCommand<BooleanAssignmentList> {
         }
     }
         return analysis.mapResult(CSL.class, "list", BooleanAssignmentList::new);
+
+         */
+        return null;
     }
 
     @Override
