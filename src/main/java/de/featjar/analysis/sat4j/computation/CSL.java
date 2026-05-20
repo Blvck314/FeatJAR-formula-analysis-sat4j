@@ -88,7 +88,7 @@ public class CSL {
         // -> This mapping has to be converted back to featjar standard after running apriori
         this.onlyPositiveInts = true;
 
-        int configAmount = 100;
+        int configAmount = 5;
         this.sample = sampleRandomConfigs(this.featureModelCNF, configAmount);
         //sample = sampleTWise(featureModelCNF, 3, configAmount);
         this.updater = new RandomConfigurationUpdater(this.featureModelCNF, 2L);
@@ -110,7 +110,7 @@ public class CSL {
          */
 
         int minInteractionSize = 1;
-        int maxInteractionSize = 2;
+        int maxInteractionSize = 3;
         long timestamp = System.currentTimeMillis();
         //CompletableFuture<Itemsets> passingFuture = runFpGrowth(true, 1, minInteractionSize, maxInteractionSize);
         //CompletableFuture<Itemsets> failingFuture = runFpGrowth(false, 1, minInteractionSize, maxInteractionSize);
@@ -122,16 +122,44 @@ public class CSL {
         //CompletableFuture<Itemsets> failingFuture = runAprioriFastInverse(false, 1, this.failing, maxInteractionSize);
 
 
-        // Sobald ein Algorithmus fertig ist, wandelt er asynchron seine Itemsets in eine schnelle Map um.
-        CompletableFuture<Map<InteractionKey, Integer>> passingMapFuture = passingFuture.thenApplyAsync(CSL::getInteractionMap);
-        CompletableFuture<Map<InteractionKey, Integer>> failingMapFuture = failingFuture.thenApplyAsync(CSL::getInteractionMap);
+        // 2. Sobald FAILING fertig ist, bauen wir daraus die Map (unser "Filter")
+        CompletableFuture<Map<InteractionKey, SupportCounts>> failingMapFuture = failingFuture.thenApplyAsync(CSL::getFailingInteractionsSupports);
 
-        // Für alle interaktionen alle metriken auf ein mal berechnen
+        // 3. Sobald BEIDES fertig ist (Map gebaut UND Passing geminet), mergen und scoren wir
         ContrastMetricCalculator calc = new ContrastMetricCalculator(this.passing, this.failing);
-        CompletableFuture<List<InteractionResult>> scoredInteractionsFuture =
-                passingMapFuture.thenCombine(failingMapFuture,
-                        (passMap, failMap) -> scoreInteractions(passMap, failMap, calc));
 
+        CompletableFuture<List<InteractionResult>> scoredInteractionsFuture =
+                failingMapFuture.thenCombineAsync(passingFuture, (combinedMap, passItemsets) -> {
+
+            // A) Zähler für Passing updaten
+            for (List<Itemset> level : passItemsets.getLevels()) {
+                for (Itemset itemset : level) {
+                    InteractionKey lookupKey = new InteractionKey(itemset.itemset);
+                    SupportCounts counts = combinedMap.get(lookupKey);
+
+                    if (counts != null) {
+                        // Muster ist verdächtig -> Wir aktualisieren den Passing-Wert!
+                        counts.pass = itemset.getAbsoluteSupport();
+                    }
+                    // Wenn null, wird das passing-Muster ignoriert (Garbage Collector räumt den lookupKey direkt ab)
+                }
+            }
+
+            // B) Metriken berechnen
+            List<InteractionResult> scoredInteractions = new ArrayList<>(combinedMap.size());
+            for (Map.Entry<InteractionKey, SupportCounts> entry : combinedMap.entrySet()) {
+                SupportCounts counts = entry.getValue();
+
+                float ochiai = calc.computeOchiai(counts.pass, counts.fail);
+                float dStar = calc.computeDStar(counts.pass, counts.fail, 2.0);
+                float growthRate = calc.computeGrowthRate(counts.pass, counts.fail);
+
+                scoredInteractions.add(new InteractionResult(
+                        entry.getKey(), ochiai, growthRate, dStar, 0, 0, 0, 0
+                ));
+            }
+            return scoredInteractions;
+                });
         List<InteractionResult> scoredInteractions = scoredInteractionsFuture.join();
 
         int k = 20;
@@ -145,6 +173,21 @@ public class CSL {
         System.out.printf("Time for pattern mining and interaction processing: %d ms", System.currentTimeMillis() - timestamp);
         FeatJAR.deinitialize();
         System.exit(0);
+    }
+
+    private static Map<InteractionKey, SupportCounts> getFailingInteractionsSupports(Itemsets failItemsets) {
+        int failItems = failItemsets.getLevels().stream().map(List::size).reduce(0, Integer::sum);
+        Map<InteractionKey, SupportCounts> baseMap = new HashMap<>((int) (failItems / 0.75) + 1);
+
+        for (List<Itemset> level : failItemsets.getLevels()) {
+            for (Itemset itemset : level) {
+                InteractionKey key = new InteractionKey(itemset.itemset);
+                // Erstelle Counter: pass = 0, fail = absoluter Support
+                SupportCounts counts = new SupportCounts(0, itemset.getAbsoluteSupport());
+                baseMap.put(key, counts);
+            }
+        }
+        return baseMap;
     }
 
     private List<InteractionResult> scoreInteractions(Map<InteractionKey, Integer> passMap, Map<InteractionKey, Integer> failMap,
@@ -169,17 +212,6 @@ public class CSL {
         }
 
         return scoredResults;
-    }
-
-    private static Map<InteractionKey, Integer> getInteractionMap(Itemsets itemsets) {
-        int items = itemsets.getLevels().stream().map(List::size).reduce(0, Integer::sum);
-        Map<InteractionKey, Integer> passMap = new HashMap<>((int) (items / 0.75));
-        for (List<Itemset> level : itemsets.getLevels()) {
-            for (Itemset itemset : level) {
-                passMap.put(new InteractionKey(itemset.itemset), itemset.getAbsoluteSupport());
-            }
-        }
-        return passMap;
     }
 
     private void setup() throws IOException {
