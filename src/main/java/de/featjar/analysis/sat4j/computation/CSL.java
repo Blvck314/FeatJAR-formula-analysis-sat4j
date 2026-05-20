@@ -32,7 +32,6 @@ import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 
@@ -89,14 +88,14 @@ public class CSL {
         // -> This mapping has to be converted back to featjar standard after running apriori
         this.onlyPositiveInts = true;
 
-        int configAmount = 30;
-        //this.sample = sampleRandomConfigs(this.featureModelCNF, configAmount);
-        sample = sampleTWise(featureModelCNF, 3, configAmount);
+        int configAmount = 100;
+        this.sample = sampleRandomConfigs(this.featureModelCNF, configAmount);
+        //sample = sampleTWise(featureModelCNF, 3, configAmount);
         this.updater = new RandomConfigurationUpdater(this.featureModelCNF, 2L);
 
         // Simulate faulty interactions
         this.tester = new ARMTester(123L, this.featureModelCNF, this.updater, this.coreFeatures, this.sample);
-        this.tester.simulateInteractionWithRandomFeatures(ARMTester.InteractionType.AND, true, false);
+        this.tester.simulateInteractionWithRandomFeatures(ARMTester.InteractionType.AND, true);
         Pair<BooleanAssignmentList, BooleanAssignmentList> testedConfigs = testSample(onlyPositiveInts);
         BooleanAssignmentList passingConfigs = testedConfigs.getFirst();
         BooleanAssignmentList failingConfigs = testedConfigs.getSecond();
@@ -112,8 +111,6 @@ public class CSL {
 
         int minInteractionSize = 1;
         int maxInteractionSize = 2;
-        long patternMinerTimestamp = System.currentTimeMillis();
-
 
         //CompletableFuture<Itemsets> passingFuture = runFpGrowth(true, 1, minInteractionSize, maxInteractionSize);
         //CompletableFuture<Itemsets> failingFuture = runFpGrowth(false, 1, minInteractionSize, maxInteractionSize);
@@ -124,44 +121,64 @@ public class CSL {
         //CompletableFuture<Itemsets> passingFuture = runAprioriFastInverse(true, 1, this.passing, maxInteractionSize);
         //CompletableFuture<Itemsets> failingFuture = runAprioriFastInverse(false, 1, this.failing, maxInteractionSize);
 
-        CompletableFuture.allOf(passingFuture, failingFuture).join();
-        System.out.printf("Time for Association Rule Mining execution: %d ms\n", System.currentTimeMillis() - patternMinerTimestamp);
 
-        Itemsets frequentInteractionsInPassingConfigs = passingFuture.get();
-        Itemsets frequentInteractionsInFailingConfigs = failingFuture.get();
+        // Sobald ein Algorithmus fertig ist, wandelt er asynchron seine Itemsets in eine schnelle Map um.
+        CompletableFuture<Map<InteractionKey, Integer>> passingMapFuture = passingFuture.thenApplyAsync(CSL::getInteractionMap);
+        CompletableFuture<Map<InteractionKey, Integer>> failingMapFuture = failingFuture.thenApplyAsync(CSL::getInteractionMap);
 
+        // Für alle interaktionen alle metriken auf ein mal berechnen
+        ContrastMetricCalculator calc = new ContrastMetricCalculator(this.passing, this.failing);
+        CompletableFuture<List<InteractionResult>> scoredInteractionsFuture =
+                passingMapFuture.thenCombine(failingMapFuture,
+                        (passMap, failMap) -> scoreInteractions(passMap, failMap, calc));
 
+        List<InteractionResult> scoredInteractions = scoredInteractionsFuture.join();
 
-        // Convert Itemset lists to a HashMap BooleanAssigment -> Absolute support (Anzahl der Vorkommen)
-        Map<BooleanAssignment, Integer> supportPerInteractionPassingConfigs =
-                transformPatterns(frequentInteractionsInPassingConfigs, onlyPositiveInts);
-        Map<BooleanAssignment, Integer> supportPerInteractionFailingConfigs =
-                transformPatterns(frequentInteractionsInFailingConfigs, onlyPositiveInts);
-
-        int expectedSetSize = supportPerInteractionPassingConfigs.size() + supportPerInteractionFailingConfigs.size();
-        int initialCapacity = (int) Math.ceil(expectedSetSize / 0.75);
-
-        Set<BooleanAssignment> interactions = new HashSet<>(initialCapacity);
-        interactions.addAll(supportPerInteractionFailingConfigs.keySet());
-        interactions.removeAll(supportPerInteractionPassingConfigs.keySet());
-        System.out.println("interactions.size() = " + interactions.size());
-
-        ContrastMetricCalculator calc = new ContrastMetricCalculator(passing, failing,
-                supportPerInteractionPassingConfigs, supportPerInteractionFailingConfigs);
-
-        // Calculate Metrics for Interactions
-        int k = 10;
-        List<Pair<BooleanAssignment, Double>> interactionsWithMetric = calc.mapInteractions(interactions, calc::computeOchiai);
-        recordResults(interactionsWithMetric, "ochiai", k);
-
-        interactionsWithMetric = calc.mapInteractions(interactions, i -> calc.computeDStar(i, 2.0));
-        recordResults(interactionsWithMetric, "d-Star", k);
-
-        interactionsWithMetric = calc.mapInteractions(interactions, calc::computeGrowthRate);
-        recordResults(interactionsWithMetric, "growth-rate", k);
+        int k = 20;
+        Comparator<InteractionResult> ochiaiComparator = (o1, o2) -> Float.compare(o1.ochiai, o2.ochiai);
+        Comparator<InteractionResult> dStarComparator = (o1, o2) -> Float.compare(o1.dStar, o2.dStar);
+        Comparator<InteractionResult> growthRateComparator = (o1, o2) -> Float.compare(o1.growthRate, o2.growthRate);
+        recordTopKResults(scoredInteractions, "ochiai", k, ochiaiComparator);
+        recordTopKResults(scoredInteractions, "d-star", k, dStarComparator);
+        recordTopKResults(scoredInteractions, "growth-rate", k, growthRateComparator);
 
         FeatJAR.deinitialize();
         System.exit(0);
+    }
+
+    private List<InteractionResult> scoreInteractions(Map<InteractionKey, Integer> passMap, Map<InteractionKey, Integer> failMap,
+                                                      ContrastMetricCalculator calc) {
+        // Da wir alle einzigartigen Interaktionen brauchen, packen wir die Keys in ein Set
+        Set<InteractionKey> allKeys = new HashSet<>(passMap.keySet());
+        allKeys.addAll(failMap.keySet());
+
+        List<InteractionResult> scoredResults = new ArrayList<>(allKeys.size());
+
+        // Iteriere über alle gefundenen Muster und berechne die Scores
+        for (InteractionKey key : allKeys) {
+            // getOrDefault schützt uns davor, dass ein Muster nur in einer Map existiert
+            int passes = passMap.getOrDefault(key, 0);
+            int fails = failMap.getOrDefault(key, 0);
+
+            float ochiai = calc.computeOchiai(passes, fails);
+            float dStar = calc.computeDStar(passes, fails, 2.0);
+            float growthRate = calc.computeGrowthRate(passes, fails);
+
+            scoredResults.add(new InteractionResult(key, ochiai, dStar, growthRate, 0, 0, 0 ,0));
+        }
+
+        return scoredResults;
+    }
+
+    private static Map<InteractionKey, Integer> getInteractionMap(Itemsets itemsets) {
+        int items = itemsets.getLevels().stream().map(List::size).reduce(0, Integer::sum);
+        Map<InteractionKey, Integer> passMap = new HashMap<>((int) (items / 0.75));
+        for (List<Itemset> level : itemsets.getLevels()) {
+            for (Itemset itemset : level) {
+                passMap.put(new InteractionKey(itemset.itemset), itemset.getAbsoluteSupport());
+            }
+        }
+        return passMap;
     }
 
     private void setup() throws IOException {
@@ -229,17 +246,50 @@ public class CSL {
         return configs;
     }
 
-    public void recordResults(List<Pair<BooleanAssignment, Double>> interactions, String metricName, int k){
-        interactions.sort((p1, p2) -> Double.compare(p2.getSecond(), p1.getSecond()));
-        String filename = metricName + ".txt";
-        writeScoredInteractionsToFile(interactions, filename);
+    public void recordTopKResults(List<InteractionResult> scoredInteractions, String metricName, int k, Comparator<InteractionResult> comparator) {
+        // Absteigend sortieren
+        scoredInteractions.sort(comparator.reversed());
 
-        if (k > 0){
-            k = Math.min(k, interactions.size());
-            List<BooleanAssignment> results = interactions.subList(0, k).stream().map(Pair::getFirst).collect(Collectors.toList());
-            printResults(results, metricName, k);
+        int limit = Math.min(k, scoredInteractions.size());
+        List<Pair<BooleanAssignment, Float>> topKForOutput = new ArrayList<>(limit);
+
+        int maxFeatureInt = sample.getVariableMap().size();
+
+        // NUR für diese Top K machen wir die teure Umrechnung!
+        for (int i = 0; i < limit; i++) {
+            InteractionResult result = scoredInteractions.get(i);
+
+            // 1. Array umwandeln (wenn nötig)
+            int[] negativeInts = onlyPositiveInts
+                    ? mapFeaturesToNegativeInts(result.features.array, maxFeatureInt)
+                    : result.features.array;
+
+            // 2. BooleanAssignment erstellen
+            BooleanAssignment assignment = new BooleanAssignment(negativeInts);
+
+            // Wert für die aktuelle Metrik holen
+            float metricValue;
+            switch (metricName) {
+                case "ochiai": {
+                    metricValue = result.ochiai;
+                    break;
+                }
+                case "d-Star": {
+                    metricValue = result.dStar;
+                    break;
+                }
+                default: {
+                    metricValue = result.growthRate;
+                    break;
+                }
+            };
+
+            topKForOutput.add(new Pair<>(assignment, metricValue));
         }
-        System.out.printf("Results recorded for metric %s in %s.\n", metricName, filename);
+        // Ab hier kannst du deine alten Methoden zum Drucken aufrufen
+        writeScoredInteractionsToFile(topKForOutput, metricName + ".txt");
+        List<BooleanAssignment> results = topKForOutput.stream().map(Pair::getFirst).collect(Collectors.toList());
+        printResults(results, metricName, limit);
     }
 
     public CompletableFuture<Itemsets> runAprioriFastClose(boolean passing, int occurrences, int maxInteractionSize){
@@ -316,11 +366,11 @@ public class CSL {
     }
 
 
-    private void writeScoredInteractionsToFile(Collection<Pair<BooleanAssignment, Double>> reducedMinimalInteractions, String path) {
+    private void writeScoredInteractionsToFile(Collection<Pair<BooleanAssignment, Float>> reducedMinimalInteractions, String path) {
         String filePath = basePath + resourcesFolder + path;
         VariableMap variableMap = sample.getVariableMap();
         try (PrintWriter out = new PrintWriter(filePath)) {
-            for (Pair<BooleanAssignment, Double> interaction : reducedMinimalInteractions) {
+            for (Pair<BooleanAssignment, Float> interaction : reducedMinimalInteractions) {
                 out.printf("%s: %f", interaction.getFirst().print(), interaction.getSecond());
                 out.print("   ");
                 for (int feature : interaction.getFirst().get()){
@@ -496,4 +546,68 @@ public class CSL {
             }
         });
     }
+
+    private static final class InteractionKey {
+        final int[] array;
+        final int hash;
+
+        InteractionKey(int[] array) {
+            this.array = array;
+            this.hash = Arrays.hashCode(array); // SPMF liefert sortierte Arrays, das klappt perfekt
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            return Arrays.equals(array, ((InteractionKey) o).array);
+        }
+
+        @Override
+        public int hashCode() { return hash; }
+    }
+
+    // Eine primitive, veränderbare Container-Klasse (spart 2 Integer-Objekte)
+    private static final class SupportCounts {
+        int pass = 0;
+        int fail = 0;
+
+        public SupportCounts(int pass, int fail) {
+            this.pass = pass;
+            this.fail = fail;
+        }
+    }
+
+    /**
+     * Container for all Metrics of an Interaction
+     */
+    public final class InteractionResult {
+        public final InteractionKey features;
+        public final float ochiai;
+        public final float dStar;
+        public final float growthRate;
+        public final float confidenceFailing;
+        public final float confidencePassing;
+        public final float liftFailing;
+        public final float liftPassing;
+
+        public InteractionResult(InteractionKey features,
+                                 float ochiai,
+                                 float growthRate,
+                                 float dStar,
+                                 float confidencePassing,
+                                 float confidenceFailing,
+                                 float liftPassing,
+                                 float liftFailing) {
+            this.features = features;
+            this.ochiai = ochiai;
+            this.growthRate = growthRate;
+            this.dStar = dStar;
+            this.confidenceFailing = confidenceFailing;
+            this.confidencePassing = confidencePassing;
+            this.liftFailing = liftFailing;
+            this.liftPassing = liftPassing;
+        }
+    }
+
 }

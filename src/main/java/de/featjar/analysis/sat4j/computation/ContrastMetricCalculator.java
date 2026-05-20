@@ -11,41 +11,29 @@ import java.util.stream.Collectors;
 
 public class ContrastMetricCalculator {
     private final int passingConfigs, failingConfigs;
-    private final Map<BooleanAssignment, Integer> supportPerPassingInteraction;
-    private final Map<BooleanAssignment, Integer> supportPerFailingInteraction;
 
-    public ContrastMetricCalculator(int passingConfigs, int failingConfigs,
-                                    Map<BooleanAssignment, Integer> supportPerPassingInteraction,
-                                    Map<BooleanAssignment, Integer> supportPerFailingInteraction) {
+    public ContrastMetricCalculator(int passingConfigs, int failingConfigs) {
         this.passingConfigs = passingConfigs;
         this.failingConfigs = failingConfigs;
-        this.supportPerPassingInteraction = supportPerPassingInteraction;
-        this.supportPerFailingInteraction = supportPerFailingInteraction;
     }
 
-    public Double computeOchiai(BooleanAssignment interaction) {
-        int fails = this.supportPerFailingInteraction.getOrDefault(interaction, 0);
-        int passes = this.supportPerPassingInteraction.getOrDefault(interaction, 0);
-        if (failingConfigs == 0) return 0.0;
-        return fails / Math.sqrt(failingConfigs * (fails + passes));
+    public float computeOchiai(int passes, int fails) {
+        if (failingConfigs == 0) return 0;
+        return (float) (fails / Math.sqrt(failingConfigs * (fails + passes)));
     }
 
-    public Double computeDStar(BooleanAssignment interaction, double e) {
-        int fails = this.supportPerFailingInteraction.getOrDefault(interaction, 0);
-        int passes = this.supportPerPassingInteraction.getOrDefault(interaction, 0);
-        return Math.pow(fails, e) / (passes + (failingConfigs - fails));
+    public float computeDStar(int passes, int fails, double e) {
+        return (float) (Math.pow(fails, e) / (passes + (failingConfigs - fails)));
     }
 
-    public Double computeGrowthRate(BooleanAssignment interaction){
-        int passes = this.supportPerPassingInteraction.getOrDefault(interaction, 0);
-        if (passes == 0) return Double.POSITIVE_INFINITY;
-        int fails = this.supportPerFailingInteraction.getOrDefault(interaction, 0);
-
-        double relativeSupportFail = (double) fails / this.failingConfigs;
-        double relativeSupportPass = (double) passes / this.passingConfigs;
-        double growthRate = relativeSupportFail /  relativeSupportPass;
+    public float computeGrowthRate(int passes, int fails){
+        if (passes == 0) return Float.POSITIVE_INFINITY;
+        float relativeSupportFail = (float) fails / this.failingConfigs;
+        float relativeSupportPass = (float) passes / this.passingConfigs;
+        float growthRate = relativeSupportFail /  relativeSupportPass;
         return growthRate;
     }
+
 
     public List<Pair<BooleanAssignment, Double>> mapInteractions(
             Collection<BooleanAssignment> interactions,
