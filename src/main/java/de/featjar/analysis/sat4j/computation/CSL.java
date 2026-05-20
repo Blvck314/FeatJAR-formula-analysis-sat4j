@@ -111,7 +111,7 @@ public class CSL {
 
         int minInteractionSize = 1;
         int maxInteractionSize = 2;
-
+        long timestamp = System.currentTimeMillis();
         //CompletableFuture<Itemsets> passingFuture = runFpGrowth(true, 1, minInteractionSize, maxInteractionSize);
         //CompletableFuture<Itemsets> failingFuture = runFpGrowth(false, 1, minInteractionSize, maxInteractionSize);
         CompletableFuture<Itemsets> passingFuture = runAprioriFast(true, 1, maxInteractionSize);
@@ -142,6 +142,7 @@ public class CSL {
         recordTopKResults(scoredInteractions, "d-star", k, dStarComparator);
         recordTopKResults(scoredInteractions, "growth-rate", k, growthRateComparator);
 
+        System.out.printf("Time for pattern mining and interaction processing: %d ms", System.currentTimeMillis() - timestamp);
         FeatJAR.deinitialize();
         System.exit(0);
     }
