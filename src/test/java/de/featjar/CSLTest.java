@@ -31,18 +31,20 @@ import java.util.Random;
 public class CSLTest {
 
     private static final long SEED = 123L;
-    private static final int RANDOM_SAMPLE_SIZE = 200;
+    private static final int RANDOM_SAMPLE_SIZE = 100;
     private static final int YASA_SAMPLE_SIZE = 200;
     private static final int YASA_T = 2;
     private static final int INTERACTION_SIZE = 2;
     private static final int CSL_MAX_T = 2;
     private static final int CSL_MINSUP = 1;
     private static final int MAX_SIMULATION_ATTEMPTS = 20;
+    private static final int TOP_K = 10;
+    private static final CSL.RankingMetric RANKING_METRIC= CSL.RankingMetric.OCHIAI;
 
     public static void main(String[] args) throws IOException {
         Path resourcesPath = Path.of(System.getProperty("user.home"), "Documents", "studium", "Bachelorarbeit",
                 "resources_featjar");
-        Path modelPath = args.length > 0 ? Path.of(args[0]) : resourcesPath.resolve("muesli-model.xml");
+        Path modelPath = args.length > 0 ? Path.of(args[0]) : resourcesPath.resolve("e-shop-model.xml");
         Path outputPath = args.length > 1 ? Path.of(args[1]) : resourcesPath.resolve("csl-generated");
         Files.createDirectories(outputPath);
 
@@ -143,7 +145,7 @@ public class CSLTest {
         System.out.printf("failing configs: %s%n", failingPath);
         tester.printInteractions();
 
-        BooleanAssignmentList result = Computations.of(clauses)
+        CSL.CSLResult result = Computations.of(clauses)
                 .map(CSL::new)
                 .set(CSL.PASSING_CONFIGS, passingConfigs)
                 .set(CSL.FAILING_CONFIGS, failingConfigs)
@@ -161,11 +163,11 @@ public class CSLTest {
                 .computeResult()
                 .orElseThrow();
 
-        Path resultPath = outputPath.resolve(name + "-csl-result.dimacs");
-        writeConfigs(result, resultPath);
-        System.out.printf("CSL result size: %d%n", result.size());
+        Path resultPath = outputPath.resolve(name + "-csl-result.tsv");
+        Files.writeString(resultPath, result.serializeAll(RANKING_METRIC));
+        System.out.printf("CSL result size: %d%n", result.getInteractions().size());
         System.out.printf("CSL result: %s%n", resultPath);
-        System.out.println(result.print());
+        System.out.println(result.serializeTopK(TOP_K, RANKING_METRIC));
     }
 
     private static boolean[] randomSigns(int interactionSize, long seed) {

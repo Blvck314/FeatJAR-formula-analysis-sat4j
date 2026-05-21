@@ -1,21 +1,25 @@
 package de.featjar.analysis.sat4j.cli;
 
 import de.featjar.analysis.sat4j.computation.CSL;
+import de.featjar.base.FeatJAR;
 import de.featjar.base.cli.Option;
 import de.featjar.base.cli.OptionList;
 import de.featjar.base.computation.IComputation;
 import de.featjar.base.data.Result;
 import de.featjar.base.io.IO;
+import de.featjar.base.io.IOMapperOptions;
 import de.featjar.base.io.format.IFormat;
 import de.featjar.base.log.Log;
 import de.featjar.formula.assignment.BooleanAssignmentGroups;
 import de.featjar.formula.assignment.BooleanAssignmentList;
 import de.featjar.formula.io.BooleanAssignmentGroupsFormats;
-import de.featjar.formula.io.dimacs.BooleanAssignmentListDimacsFormat;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Optional;
 
-public class CSLCommand extends ASAT4JAnalysisCommand<BooleanAssignmentList> {
+public class CSLCommand extends ASAT4JAnalysisCommand<CSL.CSLResult> {
 
     public static final Option<Path> FAILING_CONFIGS_OPTION = Option.newOption("fc", Option.PathParser)
             .setDescription("Path to the file containing all failing configurations of the sample.")
@@ -69,11 +73,74 @@ public class CSLCommand extends ASAT4JAnalysisCommand<BooleanAssignmentList> {
             .setDescription("Minimal lift threshold.")
             .setDefaultValue(0.0);
 
+    public static final Option<Integer> TOP_K_OPTION = Option.newOption("k", Option.IntegerParser)
+            .setDescription("Number of top-ranked interactions to print to stdout. Use 0 to print all.")
+            .setValidator(k -> k >= 0)
+            .setDefaultValue(10);
+
+    public static final Option<CSL.RankingMetric> RANKING_METRIC_OPTION =
+            Option.newEnumOption("rank-by", CSL.RankingMetric.class)
+                    .setDescription("Metric used to rank printed and written interactions.")
+                    .setDefaultValue(CSL.RankingMetric.OCHIAI);
 
     @Override
-    protected IComputation<BooleanAssignmentList> newAnalysis(
+    public int run(OptionList optionParser) {
+        boolean parallel = !optionParser.get(NON_PARALLEL);
+        Duration timeout = optionParser.get(TIMEOUT_OPTION);
+        Path outputPath = optionParser.getResult(OUTPUT_OPTION).orElse(null);
+        if (optionParser.get(INTPUT_COMPRESSION_OPTION)) {
+            ioInputOptions = new IOMapperOptions[] {IOMapperOptions.ZIP_COMPRESSION};
+        }
+        if (optionParser.get(OUTPUT_COMPRESSION_OPTION)) {
+            ioOutputOptions = new IOMapperOptions[] {IOMapperOptions.ZIP_COMPRESSION};
+        }
+
+        IComputation<CSL.CSLResult> computation;
+        try {
+            computation = newComputation(optionParser);
+        } catch (Exception e) {
+            FeatJAR.log().error(e);
+            FeatJAR.log().plainMessage(OptionList.printHelp(this));
+            return FeatJAR.ERROR_COMPUTING_RESULT;
+        }
+
+        Result<CSL.CSLResult> result;
+        if (!timeout.isZero()) {
+            result = computation.computeResult(true, true, timeout);
+        } else if (parallel) {
+            result = computation.computeFutureResult(true, true).get();
+        } else {
+            result = computation.computeResult(true, true);
+        }
+
+        if (result.isEmpty()) {
+            FeatJAR.log().problems(result.getProblems());
+            FeatJAR.log().error("Could not compute result.");
+            return FeatJAR.ERROR_TIMEOUT;
+        }
+
+        CSL.RankingMetric rankingMetric = optionParser.get(RANKING_METRIC_OPTION);
+        FeatJAR.log().plainMessage(result.get().serializeTopK(optionParser.get(TOP_K_OPTION), rankingMetric));
+
+        if (outputPath != null) {
+            if (Files.isDirectory(outputPath)) {
+                FeatJAR.log().error(new IOException(outputPath + " is a directory"));
+                return FeatJAR.ERROR_WRITING_RESULT;
+            }
+            try {
+                IO.save(result.get(), outputPath, getOuputFormat(optionParser), ioOutputOptions);
+            } catch (IOException e) {
+                FeatJAR.log().error(e);
+                return FeatJAR.ERROR_WRITING_RESULT;
+            }
+        }
+        return 0;
+    }
+
+    @Override
+    protected IComputation<CSL.CSLResult> newAnalysis(
             OptionList optionParser, IComputation<BooleanAssignmentList> formula) {
-        IComputation<BooleanAssignmentList> analysis = formula.map(CSL::new)
+        IComputation<CSL.CSLResult> analysis = formula.map(CSL::new)
                 .set(CSL.RANDOM_SEED, optionParser.get(RANDOM_SEED_OPTION))
                 .set(CSL.SAT_TIMEOUT, optionParser.get(SAT_TIMEOUT_OPTION))
                 .set(CSL.MIN_T, optionParser.get(MIN_T_OPTION))
@@ -105,8 +172,8 @@ public class CSLCommand extends ASAT4JAnalysisCommand<BooleanAssignmentList> {
     }
 
     @Override
-    protected IFormat<BooleanAssignmentList> getOuputFormat(OptionList optionParser) {
-        return new BooleanAssignmentListDimacsFormat();
+    protected IFormat<CSL.CSLResult> getOuputFormat(OptionList optionParser) {
+        return new CSLResultFormat(optionParser.get(RANKING_METRIC_OPTION));
     }
 
     @Override
@@ -117,5 +184,33 @@ public class CSLCommand extends ASAT4JAnalysisCommand<BooleanAssignmentList> {
     @Override
     public Optional<String> getShortName() {
         return Optional.of("csl");
+    }
+
+    private static final class CSLResultFormat implements IFormat<CSL.CSLResult> {
+        private final CSL.RankingMetric rankingMetric;
+
+        private CSLResultFormat(CSL.RankingMetric rankingMetric) {
+            this.rankingMetric = rankingMetric;
+        }
+
+        @Override
+        public Result<String> serialize(CSL.CSLResult result) {
+            return Result.of(result.serializeAll(rankingMetric));
+        }
+
+        @Override
+        public String getFileExtension() {
+            return "tsv";
+        }
+
+        @Override
+        public String getName() {
+            return "CSL TSV";
+        }
+
+        @Override
+        public boolean supportsWrite() {
+            return true;
+        }
     }
 }
