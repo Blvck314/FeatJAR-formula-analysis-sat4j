@@ -7,7 +7,6 @@ import de.featjar.formula.VariableMap;
 import de.featjar.formula.assignment.BooleanAssignment;
 import de.featjar.formula.assignment.BooleanAssignmentList;
 import de.featjar.formula.assignment.BooleanSolution;
-import de.featjar.formula.assignment.ValuedBooleanAssignment;
 
 import java.util.*;
 import java.util.stream.Collectors;
@@ -18,7 +17,7 @@ public class ARMTester implements IConfigurationTester {
         AND, OR, XOR, IMPLIES, EQUIV
     }
 
-    private final Set<int[]> faultyInteractions;
+    private final List<int[]> faultyInteractions;
     private final BooleanAssignmentList featureModelCNF;
     private final Random random;
     private final List<Integer> eligibleFeatures;
@@ -27,7 +26,7 @@ public class ARMTester implements IConfigurationTester {
 
     public ARMTester(long seed, BooleanAssignmentList featureModelCNF, RandomConfigurationUpdater updater, BooleanAssignment coreFeatures,
                      BooleanAssignmentList sample) {
-        this.faultyInteractions = new HashSet<>();
+        this.faultyInteractions = new ArrayList<>();
         this.featureModelCNF = featureModelCNF;
         this.random = new Random(seed);
         this.updater = updater;
@@ -87,7 +86,7 @@ public class ARMTester implements IConfigurationTester {
         List<int[]> dnf = buildDNF(type, features);
 
         if (isSatisfiable(dnf)) {
-            return faultyInteractions.addAll(dnf);
+            return addAllInteractions(dnf);
         }
         throw new RuntimeException("Konnte keine erfüllbare " + type + "-Interaktion mit " + Arrays.toString(features) + " generieren.");
     }
@@ -150,11 +149,26 @@ public class ARMTester implements IConfigurationTester {
         return false;
     }
 
+    public boolean addAllInteractions(Collection<int[]> interactions){
+        for (int[] interactionArr : interactions){
+            Arrays.sort(interactionArr);
+            if (!addInteraction(interactionArr)) return false;
+        }
+        return true;
+    }
+
     public boolean addInteraction(int... faultyInteraction) {
         if (updater == null) throw new IllegalStateException("Updater is null");
 
+        int[] sortedInteraction = Arrays.stream(faultyInteraction).sorted().toArray();
+        for (int[] existing : faultyInteractions) {
+            if (Arrays.equals(existing, sortedInteraction)) {
+                return false;
+            }
+        }
+
         if (isSatisfiable(new ArrayList<>(Collections.singleton(faultyInteraction)))){
-            return faultyInteractions.add(faultyInteraction);
+            return faultyInteractions.add(sortedInteraction);
         }
         return false;
     }
@@ -169,7 +183,7 @@ public class ARMTester implements IConfigurationTester {
         return addInteraction(faultyInteraction);
     }
 
-    public Set<int[]> getInteractions() {
+    public List<int[]> getInteractions() {
         return faultyInteractions;
     }
 

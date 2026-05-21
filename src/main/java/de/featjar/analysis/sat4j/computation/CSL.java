@@ -3,497 +3,300 @@ package de.featjar.analysis.sat4j.computation;
 import ca.pfv.spmf.algorithms.frequentpatterns.apriori_fast.AlgoAprioriFAST;
 import ca.pfv.spmf.algorithms.frequentpatterns.apriori_fast.AlgoAprioriFASTClose;
 import ca.pfv.spmf.algorithms.frequentpatterns.apriori_fast.AlgoAprioriFASTInverse;
+import ca.pfv.spmf.algorithms.frequentpatterns.fpgrowth.AlgoFPGrowth;
 import ca.pfv.spmf.patterns.itemset_array_integers_with_count.Itemset;
 import ca.pfv.spmf.patterns.itemset_array_integers_with_count.Itemsets;
-import ca.pfv.spmf.algorithms.frequentpatterns.fpgrowth.AlgoFPGrowth;
-import de.featjar.analysis.sat4j.solver.ISelectionStrategy;
-import de.featjar.analysis.sat4j.solver.ModalImplicationGraph;
-import de.featjar.base.FeatJAR;
 import de.featjar.base.computation.Computations;
 import de.featjar.base.computation.Dependency;
+import de.featjar.base.computation.IComputation;
 import de.featjar.base.computation.Progress;
-import de.featjar.base.data.Pair;
 import de.featjar.base.data.Result;
-import de.featjar.base.io.input.FileInputMapper;
 import de.featjar.formula.VariableMap;
 import de.featjar.formula.assignment.BooleanAssignment;
 import de.featjar.formula.assignment.BooleanAssignmentList;
-import de.featjar.formula.assignment.conversion.ComputeBooleanClauseList;
-import de.featjar.formula.combination.VariableCombinationSpecification;
-import de.featjar.formula.computation.ComputeCNFFormula;
-import de.featjar.formula.computation.ComputeNNFFormula;
-import de.featjar.formula.io.xml.XMLFeatureModelFormulaParser;
-import de.featjar.formula.structure.IFormula;
-
-import java.io.*;
+import java.io.BufferedWriter;
+import java.io.IOException;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
+/**
+ * Mines contrast-set-like feature interactions from passing and failing configurations.
+ */
+public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
 
-public class CSL {
-
-    public final Dependency<Integer> T = Dependency.newDependency(Integer.class);
-    public final Dependency<ModalImplicationGraph> MIG =
-            Dependency.newDependency(ModalImplicationGraph.class);
-
-    public final Dependency<BooleanAssignmentList> FAILING_CONFIGS =
-            Dependency.newDependency(BooleanAssignmentList.class);
-    public final Dependency<BooleanAssignmentList> PASSING_CONFIGS =
-            Dependency.newDependency(BooleanAssignmentList.class);
-    public final Dependency<Double> MINSUPP =  Dependency.newDependency(Double.class);
-    public final Dependency<Double> MINCONF =  Dependency.newDependency(Double.class);
-
-
-    private ARMTester tester;
-    private RandomConfigurationUpdater updater;
-    private BooleanAssignmentList sample;
-    private IFormula featureModelFormula;
-    private BooleanAssignmentList featureModelCNF;
-    private BooleanAssignment coreFeatures;
-    private final String featureModelFile = "e-shop-model.xml";
-    private final String basePath =
-            System.getProperty("user.home") + "/Documents/studium/Bachelorarbeit/".replace("/", File.separator);
-    private final String resourcesFolder = "resources_featjar/".replace("/", File.separator);
-    private int passing = 0, failing = 0;
-    private boolean onlyPositiveInts = false;
-
-   
-    
-    public CSL(){
-
+    public enum Algorithm {
+        APRIORI_FAST,
+        APRIORI_FAST_CLOSE,
+        APRIORI_FAST_INVERSE,
+        FP_GROWTH
     }
 
+    public static final Dependency<BooleanAssignmentList> PASSING_CONFIGS =
+            Dependency.newDependency(BooleanAssignmentList.class);
+    public static final Dependency<BooleanAssignmentList> FAILING_CONFIGS =
+            Dependency.newDependency(BooleanAssignmentList.class);
+    public static final Dependency<BooleanAssignment> CORE_FEATURES = Dependency.newDependency(BooleanAssignment.class);
+    public static final Dependency<Integer> MIN_T = Dependency.newDependency(Integer.class);
+    public static final Dependency<Integer> MAX_T = Dependency.newDependency(Integer.class);
+    public static final Dependency<Integer> MINSUP = Dependency.newDependency(Integer.class);
+    public static final Dependency<Integer> MAXSUP = Dependency.newDependency(Integer.class);
+    public static final Dependency<Algorithm> ALGORITHM = Dependency.newDependency(Algorithm.class);
+    public static final Dependency<Double> MIN_OCHIAI = Dependency.newDependency(Double.class);
+    public static final Dependency<Double> MIN_GROWTH_RATE = Dependency.newDependency(Double.class);
+    public static final Dependency<Double> MIN_DSTAR = Dependency.newDependency(Double.class);
+    public static final Dependency<Double> MIN_CONFIDENCE = Dependency.newDependency(Double.class);
+    public static final Dependency<Double> MIN_LIFT = Dependency.newDependency(Double.class);
+
+    public CSL(IComputation<BooleanAssignmentList> clauseList, Object... computations) {
+        super(
+                clauseList,
+                Computations.of(new BooleanAssignmentList((VariableMap) null)),
+                Computations.of(new BooleanAssignmentList((VariableMap) null)),
+                new ComputeCoreSAT4J(clauseList)
+                        .mapResult(CSL.class, "coreFeatures", core -> {
+                            BooleanAssignment firstGroup = core.getFirst();
+                            return firstGroup != null ? firstGroup : new BooleanAssignment();
+                        }),
+                Computations.of(1),
+                Computations.of(3),
+                Computations.of(1),
+                Computations.of(Integer.MAX_VALUE),
+                Computations.of(Algorithm.APRIORI_FAST),
+                Computations.of(0.0),
+                Computations.of(0.0),
+                Computations.of(0.0),
+                Computations.of(0.0),
+                Computations.of(0.0),
+                computations);
+    }
+
+    protected CSL(CSL other) {
+        super(other);
+    }
+
+    @Override
     public Result<BooleanAssignmentList> compute(List<Object> dependencyList, Progress progress) {
-        BooleanAssignmentList passingConfigAssignmentList = PASSING_CONFIGS.get(dependencyList);
-        BooleanAssignmentList failingConfigAssignmentList = FAILING_CONFIGS.get(dependencyList);
+        BooleanAssignmentList clauseList = BOOLEAN_CLAUSE_LIST.get(dependencyList);
+        BooleanAssignmentList passingConfigs = PASSING_CONFIGS.get(dependencyList);
+        BooleanAssignmentList failingConfigs = FAILING_CONFIGS.get(dependencyList);
+        BooleanAssignment coreFeatures = CORE_FEATURES.get(dependencyList);
+        int minT = MIN_T.get(dependencyList);
+        int maxT = MAX_T.get(dependencyList);
+        int minsup = MINSUP.get(dependencyList);
+        int maxsup = MAXSUP.get(dependencyList);
+        Algorithm algorithm = ALGORITHM.get(dependencyList);
 
-        return null;
+        if (passingConfigs.getVariableMap() == null) {
+            passingConfigs = new BooleanAssignmentList(clauseList.getVariableMap(), passingConfigs.getAll());
+        }
+        if (failingConfigs.getVariableMap() == null) {
+            failingConfigs = new BooleanAssignmentList(clauseList.getVariableMap(), failingConfigs.getAll());
+        }
+
+        if (failingConfigs.isEmpty()) {
+            return Result.empty(new IllegalArgumentException("No failing configurations specified."));
+        }
+        if (minT <= 0 || maxT < minT) {
+            return Result.empty(new IllegalArgumentException("Invalid interaction size range."));
+        }
+        if (minsup <= 0) {
+            return Result.empty(new IllegalArgumentException("Minimum support must be greater than zero."));
+        }
+        if (algorithm == Algorithm.APRIORI_FAST_INVERSE && maxsup < minsup) {
+            return Result.empty(new IllegalArgumentException("Maximum support must be at least the minimum support."));
+        }
+
+        Set<Integer> coreFeatureSet =
+                Arrays.stream(coreFeatures.get()).boxed().collect(Collectors.toCollection(LinkedHashSet::new));
+        BooleanAssignmentList minedPassingConfigs = removeFromConfigs(passingConfigs, coreFeatureSet);
+        BooleanAssignmentList minedFailingConfigs = removeFromConfigs(failingConfigs, coreFeatureSet);
+
+        progress.setTotalSteps(3);
+        progress.incrementCurrentStep();
+        checkCancel();
+
+        try {
+            CompletableFuture<Map<BooleanAssignment, Integer>> passingFuture =
+                    CompletableFuture.supplyAsync(() -> mine(minedPassingConfigs, minT, maxT, minsup, maxsup, algorithm));
+            CompletableFuture<Map<BooleanAssignment, Integer>> failingFuture =
+                    CompletableFuture.supplyAsync(() -> mine(minedFailingConfigs, minT, maxT, minsup, maxsup, algorithm));
+
+            Map<BooleanAssignment, Integer> supportPerPassingInteraction = passingFuture.join();
+            Map<BooleanAssignment, Integer> supportPerFailingInteraction = failingFuture.join();
+
+            progress.incrementCurrentStep();
+            checkCancel();
+
+            LinkedHashSet<BooleanAssignment> interactions = new LinkedHashSet<>(supportPerFailingInteraction.keySet());
+            interactions.removeAll(supportPerPassingInteraction.keySet());
+
+            ContrastMetricCalculator metrics = new ContrastMetricCalculator(
+                    passingConfigs.size(),
+                    failingConfigs.size(),
+                    supportPerPassingInteraction,
+                    supportPerFailingInteraction);
+            List<BooleanAssignment> result = interactions.stream()
+                    .filter(interaction -> passesMetricThresholds(interaction, dependencyList, metrics))
+                    .sorted(interactionComparator(metrics))
+                    .collect(Collectors.toCollection(ArrayList::new));
+
+            progress.incrementCurrentStep();
+            return Result.of(new BooleanAssignmentList(clauseList.getVariableMap(), result));
+        } catch (Exception e) {
+            return Result.empty(e);
+        }
     }
 
-    public static void main(String[] args) throws IOException, ExecutionException, InterruptedException {
-        CSL csl = new CSL();
-        csl.main();
-    }
-    
-    public void main() throws ExecutionException, InterruptedException, IOException {
-        setup();
+    private Map<BooleanAssignment, Integer> mine(
+            BooleanAssignmentList configs, int minT, int maxT, int minsup, int maxsup, Algorithm algorithm) {
+        if (configs.isEmpty()) {
+            return new LinkedHashMap<>();
+        }
 
-        // Third parameter must be true for AlgoAprioriFAST
-        // This converts the mixture of positive and negative integers for feature representation to only positive
-        // -> This mapping has to be converted back to featjar standard after running apriori
-        this.onlyPositiveInts = true;
-
-        int configAmount = 30;
-        //this.sample = sampleRandomConfigs(this.featureModelCNF, configAmount);
-        sample = sampleTWise(featureModelCNF, 3, configAmount);
-        this.updater = new RandomConfigurationUpdater(this.featureModelCNF, 2L);
-
-        // Simulate faulty interactions
-        this.tester = new ARMTester(123L, this.featureModelCNF, this.updater, this.coreFeatures, this.sample);
-        this.tester.simulateInteractionWithRandomFeatures(ARMTester.InteractionType.AND, true, false);
-        Pair<BooleanAssignmentList, BooleanAssignmentList> testedConfigs = testSample(onlyPositiveInts);
-        BooleanAssignmentList passingConfigs = testedConfigs.getFirst();
-        BooleanAssignmentList failingConfigs = testedConfigs.getSecond();
-
-        /*
-        CompletableFuture<Itemsets> oneWisePassingInteractionsFuture = runFpGrowth(true, 1, 1, 1);
-        CompletableFuture<Itemsets> oneWiseFailingInteractionsFuture = runFpGrowth(false, 1, 1, 1);
-        CompletableFuture.allOf(oneWisePassingInteractionsFuture, oneWiseFailingInteractionsFuture);
-
-        Itemsets oneWisePassingInteractionsItemsets = oneWisePassingInteractionsFuture.get();
-        Itemsets oneWiseFailingInteractionsItemsets = oneWiseFailingInteractionsFuture.get();
-         */
-
-        int minInteractionSize = 1;
-        int maxInteractionSize = 2;
-        long patternMinerTimestamp = System.currentTimeMillis();
-
-
-        //CompletableFuture<Itemsets> passingFuture = runFpGrowth(true, 1, minInteractionSize, maxInteractionSize);
-        //CompletableFuture<Itemsets> failingFuture = runFpGrowth(false, 1, minInteractionSize, maxInteractionSize);
-        CompletableFuture<Itemsets> passingFuture = runAprioriFast(true, 1, maxInteractionSize);
-        CompletableFuture<Itemsets> failingFuture = runAprioriFast(false, 1, maxInteractionSize);
-        //CompletableFuture<Itemsets> passingFuture = runAprioriFastClose(true, 1, maxInteractionSize);
-        //CompletableFuture<Itemsets> failingFuture = runAprioriFastClose(false, 1, maxInteractionSize);
-        //CompletableFuture<Itemsets> passingFuture = runAprioriFastInverse(true, 1, this.passing, maxInteractionSize);
-        //CompletableFuture<Itemsets> failingFuture = runAprioriFastInverse(false, 1, this.failing, maxInteractionSize);
-
-        CompletableFuture.allOf(passingFuture, failingFuture).join();
-        System.out.printf("Time for Association Rule Mining execution: %d ms\n", System.currentTimeMillis() - patternMinerTimestamp);
-
-        Itemsets frequentInteractionsInPassingConfigs = passingFuture.get();
-        Itemsets frequentInteractionsInFailingConfigs = failingFuture.get();
-
-
-
-        // Convert Itemset lists to a HashMap BooleanAssigment -> Absolute support (Anzahl der Vorkommen)
-        Map<BooleanAssignment, Integer> supportPerInteractionPassingConfigs =
-                transformPatterns(frequentInteractionsInPassingConfigs, onlyPositiveInts);
-        Map<BooleanAssignment, Integer> supportPerInteractionFailingConfigs =
-                transformPatterns(frequentInteractionsInFailingConfigs, onlyPositiveInts);
-
-        int expectedSetSize = supportPerInteractionPassingConfigs.size() + supportPerInteractionFailingConfigs.size();
-        int initialCapacity = (int) Math.ceil(expectedSetSize / 0.75);
-
-        Set<BooleanAssignment> interactions = new HashSet<>(initialCapacity);
-        interactions.addAll(supportPerInteractionFailingConfigs.keySet());
-        interactions.removeAll(supportPerInteractionPassingConfigs.keySet());
-        System.out.println("interactions.size() = " + interactions.size());
-
-        ContrastMetricCalculator calc = new ContrastMetricCalculator(passing, failing,
-                supportPerInteractionPassingConfigs, supportPerInteractionFailingConfigs);
-
-        // Calculate Metrics for Interactions
-        int k = 10;
-        List<Pair<BooleanAssignment, Double>> interactionsWithMetric = calc.mapInteractions(interactions, calc::computeOchiai);
-        recordResults(interactionsWithMetric, "ochiai", k);
-
-        interactionsWithMetric = calc.mapInteractions(interactions, i -> calc.computeDStar(i, 2.0));
-        recordResults(interactionsWithMetric, "d-Star", k);
-
-        interactionsWithMetric = calc.mapInteractions(interactions, calc::computeGrowthRate);
-        recordResults(interactionsWithMetric, "growth-rate", k);
-
-        FeatJAR.deinitialize();
-        System.exit(0);
-    }
-
-    private void setup() throws IOException {
-        FeatJAR.initialize();
-        // Paths for configs, fm
-        Path modelPath = Path.of(this.basePath, this.resourcesFolder, this.featureModelFile);
-        this.featureModelFormula = parseModel(modelPath);
-        this.featureModelCNF = Computations.async(this.featureModelFormula)
-                .map(ComputeNNFFormula::new)
-                .map(ComputeCNFFormula::new)
-                .map(ComputeBooleanClauseList::new)
-                .computeResult().orElseThrow();
-
-        this.coreFeatures = Computations.async(featureModelCNF)
-                .map(ComputeCoreSAT4J::new)
-                .computeResult().orElseThrow().getFirst();
-    }
-
-    /**
-     * Tests the configs, sets core features to zero and writes them to files as a preparation for the ARM algorithm.
-     * @param onlyPositiveInts
-     * @return
-     */
-    private Pair<BooleanAssignmentList, BooleanAssignmentList> testSample(boolean onlyPositiveInts) {
-        Set<Integer> coreFeaturesSet = Arrays.stream(this.coreFeatures.get())
-                .boxed().collect(Collectors.toCollection(HashSet::new));
-        // Test configs
-        Pair<BooleanAssignmentList, BooleanAssignmentList> testedSample = this.tester.testSample(this.sample);
-        BooleanAssignmentList passingConfigs = testedSample.getFirst();
-        this.passing = passingConfigs.size();
-        BooleanAssignmentList failingConfigs = testedSample.getSecond();
-        this.failing = failingConfigs.size();
-
-        String configs = basePath + resourcesFolder;
-        Path passingConfigsPath = Path.of(configs, "passingConfigs.txt");
-        passingConfigs = removeFromConfigs(passingConfigs, coreFeaturesSet);
-        writeConfigsToFile(passingConfigs, passingConfigsPath, onlyPositiveInts);
-
-        Path failingConfigsPath = Path.of(configs, "failingConfigs.txt");
-        failingConfigs = removeFromConfigs(failingConfigs, coreFeaturesSet);
-        writeConfigsToFile(failingConfigs, failingConfigsPath, onlyPositiveInts);
-
-        System.out.println("Passing: " + passing);
-        System.out.println("Failing: " + failing);
-        System.out.println("Sample size: " + sample.size());
-        tester.printInteractions();
-        return new Pair<>(passingConfigs, failingConfigs);
-    }
-
-    /**
-     * Removes the given feature ints from the configs.
-     * @param configs
-     * @param featuresToRemove
-     * @return
-     */
-    public BooleanAssignmentList removeFromConfigs(BooleanAssignmentList configs, Set<Integer> featuresToRemove){
-        for (BooleanAssignment config : configs){
-            for (int i = 0; i < config.get().length; i++) {
-                int feature = config.get(i);
-                if (feature != 0 && featuresToRemove.contains(feature)){
-                    config.get()[i] = 0;
+        Path inputPath = null;
+        try {
+            inputPath = Files.createTempFile("featjar-csl-", ".transactions");
+            writeConfigsToFile(configs, inputPath);
+            Itemsets itemsets = runMiner(inputPath, configs.size(), minT, maxT, minsup, maxsup, algorithm);
+            return transformPatterns(itemsets, configs.getVariableMap().size(), minT, maxT);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        } finally {
+            if (inputPath != null) {
+                try {
+                    Files.deleteIfExists(inputPath);
+                } catch (IOException ignored) {
                 }
             }
         }
-        return configs;
     }
 
-    public void recordResults(List<Pair<BooleanAssignment, Double>> interactions, String metricName, int k){
-        interactions.sort((p1, p2) -> Double.compare(p2.getSecond(), p1.getSecond()));
-        String filename = metricName + ".txt";
-        writeScoredInteractionsToFile(interactions, filename);
+    private Itemsets runMiner(Path inputPath, int configCount, int minT, int maxT, int minsup, int maxsup, Algorithm algorithm)
+            throws Exception {
+        double relativeMinSup = (double) minsup / configCount;
+        String input = inputPath.toString();
 
-        if (k > 0){
-            k = Math.min(k, interactions.size());
-            List<BooleanAssignment> results = interactions.subList(0, k).stream().map(Pair::getFirst).collect(Collectors.toList());
-            printResults(results, metricName, k);
-        }
-        System.out.printf("Results recorded for metric %s in %s.\n", metricName, filename);
-    }
-
-    public CompletableFuture<Itemsets> runAprioriFastClose(boolean passing, int occurrences, int maxInteractionSize){
-        AlgoAprioriFASTClose algo = new AlgoAprioriFASTClose();
-        algo.setMaximumPatternLength(maxInteractionSize);
-
-        return runMinerAsync(passing, occurrences,
-                (inputPath, minsup) -> algo.runAlgorithm(minsup, inputPath, null, 30),
-                algo::printStats
-        );
-    }
-
-    public CompletableFuture<Itemsets> runAprioriFastInverse(boolean passing, int minOccurrences, int maxOccurrences, int maxInteractionSize){
-        AlgoAprioriFASTInverse algo = new AlgoAprioriFASTInverse();
-        algo.setMaximumPatternLength(maxInteractionSize);
-
-        return runMinerAsync(passing, minOccurrences,
-                ((inputPath, minsup) -> algo.runAlgorithm(minsup, minsup * (double) (maxOccurrences/minOccurrences), inputPath, null, 30)),
-                algo::printStats
-        );
-    }
-
-    public CompletableFuture<Itemsets> runAprioriFast(boolean passing, int occurrences, int maxInteractionSize){
-        AlgoAprioriFAST algo = new AlgoAprioriFAST();
-        algo.setMaximumPatternLength(maxInteractionSize);
-
-        return runMinerAsync(passing, occurrences,
-                ((inputPath, minsup) -> algo.runAlgorithm(minsup, inputPath, null, 30)),
-                algo::printStats
-        );
-    }
-
-
-    public CompletableFuture<Itemsets> runFpGrowth(boolean passing, int occurrences, int minInteractionSize, int maxInteractionSize){
-        AlgoFPGrowth fpGrowth = new AlgoFPGrowth();
-        fpGrowth.setMinimumPatternLength(minInteractionSize);
-        fpGrowth.setMaximumPatternLength(maxInteractionSize);
-
-        return runMinerAsync(passing, occurrences,
-                (inputPath, minsup) -> fpGrowth.runAlgorithm(inputPath, null, minsup),
-                fpGrowth::printStats
-        );
-    }
-
-    /**
-     * Maps (complete) feature sets / configs from the representation of only positive integers to the FearJAR
-     * representation with positive and negative integers for included and excluded features.
-     * @param features
-     * @param maxFeatureInt
-     * @return
-     */
-    private int[] mapFeaturesToNegativeInts(int[] features, int maxFeatureInt){
-        return Arrays.stream(features).map(f -> {
-            if (f > maxFeatureInt + 1){
-                return -(Integer.MAX_VALUE - f);
-            }
-            return f;
-        }).toArray();
-    }
-
-    /**
-     * Maps (complete) feature sets / configs from the FeatJAR representation of positve and negative ints
-     * for inlcuded and excluded features to only positive integers for compatibility purposes with SPMF algorithms.
-     * @param features
-     * @return
-     */
-    private int[] mapFeaturesToPositiveInts(int[] features){
-        return Arrays.stream(features).map(f -> {
-            if (f < 0) {
-                return Integer.MAX_VALUE + f;
-            }
-            return f;
-        }).toArray();
-    }
-
-
-    private void writeScoredInteractionsToFile(Collection<Pair<BooleanAssignment, Double>> reducedMinimalInteractions, String path) {
-        String filePath = basePath + resourcesFolder + path;
-        VariableMap variableMap = sample.getVariableMap();
-        try (PrintWriter out = new PrintWriter(filePath)) {
-            for (Pair<BooleanAssignment, Double> interaction : reducedMinimalInteractions) {
-                out.printf("%s: %f", interaction.getFirst().print(), interaction.getSecond());
-                out.print("   ");
-                for (int feature : interaction.getFirst().get()){
-                    String sFeature = variableMap.get(Math.abs(feature)).orElseThrow();
-                    if (feature < 0){
-                        out.printf("not-%s ", sFeature);
-                    } else {
-                        out.printf("%s ", sFeature);
-                    }
-                }
-                out.println();
-            }
-            out.flush();
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
+        switch (algorithm) {
+            case APRIORI_FAST:
+                AlgoAprioriFAST aprioriFast = new AlgoAprioriFAST();
+                aprioriFast.setMaximumPatternLength(maxT);
+                return aprioriFast.runAlgorithm(relativeMinSup, input, null, 30);
+            case APRIORI_FAST_CLOSE:
+                AlgoAprioriFASTClose aprioriFastClose = new AlgoAprioriFASTClose();
+                aprioriFastClose.setMaximumPatternLength(maxT);
+                return aprioriFastClose.runAlgorithm(relativeMinSup, input, null, 30);
+            case APRIORI_FAST_INVERSE:
+                AlgoAprioriFASTInverse aprioriFastInverse = new AlgoAprioriFASTInverse();
+                aprioriFastInverse.setMaximumPatternLength(maxT);
+                double relativeMaxSup = (double) maxsup / configCount;
+                return aprioriFastInverse.runAlgorithm(relativeMinSup, relativeMaxSup, input, null, 30);
+            case FP_GROWTH:
+                AlgoFPGrowth fpGrowth = new AlgoFPGrowth();
+                fpGrowth.setMinimumPatternLength(minT);
+                fpGrowth.setMaximumPatternLength(maxT);
+                return fpGrowth.runAlgorithm(input, null, relativeMinSup);
+            default:
+                throw new IllegalArgumentException("Unsupported algorithm: " + algorithm);
         }
     }
 
-    private void writeInteractionsToFile(Collection<BooleanAssignment> interactions, String path) {
-        String filePath = basePath + resourcesFolder + path;
-        VariableMap variableMap = sample.getVariableMap();
-        try (PrintWriter out = new PrintWriter(filePath)) {
-            for (BooleanAssignment pattern : interactions) {
-                out.print(pattern.print());
-                out.print("   ");
-                for (int feature : pattern.get()){
-                    String sFeature = variableMap.get(Math.abs(feature)).orElseThrow();
-                    if (feature < 0){
-                        out.printf("not-%s ", sFeature);
-                    } else {
-                        out.printf("%s ", sFeature);
-                    }
-                }
-                out.println();
-            }
-            out.flush();
-        } catch (FileNotFoundException e) {
-            e.printStackTrace();
-        }
+    private BooleanAssignmentList removeFromConfigs(BooleanAssignmentList configs, Set<Integer> featuresToRemove) {
+        return new BooleanAssignmentList(
+                configs.getVariableMap(),
+                configs.stream()
+                        .map(config -> new BooleanAssignment(Arrays.stream(config.get())
+                                .filter(feature -> feature != 0)
+                                .filter(feature -> !featuresToRemove.contains(feature))
+                                .toArray()))
+                        .collect(Collectors.toList()));
     }
 
-    /**
-     * Prints which simulated interaction is contained or not contained in the List.
-     * @param suspectInteractions List of potential faulty interactions.
-     */
-    public void printResults(Collection<BooleanAssignment> suspectInteractions, String metricName, int k) {
-        System.out.printf("\n========= Results for %s with top-k = %d =========\n", metricName, k);
-        boolean foundAllInteractions = true;
-        for (int[] simulatedInteraction : tester.getInteractions()) {
-            boolean foundThisInteraction = false;
-            for (BooleanAssignment foundInteraction : suspectInteractions) {
-                if (foundInteraction.get().length == simulatedInteraction.length &&
-                        foundInteraction.containsAll(simulatedInteraction)) {
-                    System.out.println("✅ Interaction " + Arrays.toString(simulatedInteraction) + " found in suspect list.");
-                    foundThisInteraction = true;
-                    break;
-                }
-            }
-            if (!foundThisInteraction) {
-                System.out.println("❌ Interaction " + Arrays.toString(simulatedInteraction) + " NOT found in suspect list.");
-                foundAllInteractions = false;
-            }
-        }
-        if (foundAllInteractions) {
-            System.out.println("--------- All interactions found! ---------");
-        }
-    }
-
-
-    public void writeConfigsToFile(BooleanAssignmentList configs, Path path, boolean onlyPositiveInts) {
-        try(BufferedWriter writer = Files.newBufferedWriter(path, Charset.defaultCharset()))
-        {
+    private void writeConfigsToFile(BooleanAssignmentList configs, Path path) throws IOException {
+        try (BufferedWriter writer = Files.newBufferedWriter(path, Charset.defaultCharset())) {
             for (BooleanAssignment configuration : configs) {
-                // Only write non-zero features
                 int[] features = Arrays.stream(configuration.get())
                         .filter(feature -> feature != 0)
+                        .map(this::mapFeatureToPositiveInt)
+                        .distinct()
+                        .sorted()
                         .toArray();
-                // For algos like AlgoAprioriFAST
-                if (onlyPositiveInts)
-                    features = mapFeaturesToPositiveInts(features);
-
-                String configStr = Arrays.stream(features)
-                        .mapToObj(String::valueOf)
-                        .reduce("", (acc, f) -> acc + f + " ");
-                writer.write(configStr + "\n");
+                String configString = Arrays.stream(features).mapToObj(String::valueOf).collect(Collectors.joining(" "));
+                writer.write(configString);
+                writer.newLine();
             }
-            writer.flush();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
         }
     }
 
-    /**
-     * Transforms itemsets to a map mapping a boolean assignment to it's corresponding support value
-     * @param itemsets
-     * @param fromOnlyPositive Has to be true, if the features were mapped to only positive ints prior
-     * @return
-     */
-    private Map<BooleanAssignment, Integer> transformPatterns(Itemsets itemsets, boolean fromOnlyPositive) {
-        int totalElements = 0;
-        for (List<Itemset> level : itemsets.getLevels()) {
-            totalElements += level.size();
-        }
-        int mapCapacity = (int) Math.ceil(totalElements / 0.75);
-        Map<BooleanAssignment, Integer> suppPerPattern = new HashMap<>(mapCapacity);
+    private int mapFeatureToPositiveInt(int feature) {
+        return feature < 0 ? Integer.MAX_VALUE + feature : feature;
+    }
 
-        int maxFeatureInt = sample.getVariableMap().size();
+    private int mapFeatureToFeatJARInt(int feature, int maxFeatureInt) {
+        return feature > maxFeatureInt ? -(Integer.MAX_VALUE - feature) : feature;
+    }
+
+    private Map<BooleanAssignment, Integer> transformPatterns(Itemsets itemsets, int maxFeatureInt, int minT, int maxT) {
+        Map<BooleanAssignment, Integer> supportPerPattern = new LinkedHashMap<>();
         for (List<Itemset> level : itemsets.getLevels()) {
             for (Itemset itemset : level) {
-                int[] features = fromOnlyPositive
-                        ? mapFeaturesToNegativeInts(itemset.itemset, maxFeatureInt)
-                        : itemset.itemset;
-
-                suppPerPattern.put(new BooleanAssignment(features), itemset.getAbsoluteSupport());
-            }
-        }
-        return suppPerPattern;
-    }
-
-    public BooleanAssignmentList sampleTWise(BooleanAssignmentList fmClauses, int T, int configLimit) {
-        return Computations.of(fmClauses)
-                .map(YASA::new)
-                .set(
-                        YASA.COMBINATION_SET,
-                        Computations.of(fmClauses)
-                                .map(VariableCombinationSpecification.VariableCombinationSpecificationComputation::new)
-                                .set(VariableCombinationSpecification.VariableCombinationSpecificationComputation.T, T)
-                )
-                .set(YASA.CONFIGURATION_LIMIT, configLimit)
-                .computeResult()
-                .orElseThrow();
-        }
-
-    public BooleanAssignmentList sampleRandomConfigs(BooleanAssignmentList clauses, int configAmount) {
-        return Computations.of(clauses)
-                .map(ComputeSolutionsSAT4J::new)
-                .set(ComputeSolutionsSAT4J.SELECTION_STRATEGY, ISelectionStrategy.NonParameterStrategy.FAST_RANDOM)
-                .set(ComputeSolutionsSAT4J.LIMIT, configAmount)
-                .set(ComputeSolutionsSAT4J.RANDOM_SEED, 1L)
-                .compute();
-    }
-
-    public IFormula parseModel(Path modelPath) throws IOException {
-        XMLFeatureModelFormulaParser parser = new XMLFeatureModelFormulaParser();
-        return parser.parse(new FileInputMapper(modelPath, Charset.defaultCharset())).orElseThrow();
-    }
-
-    @FunctionalInterface
-    private interface IMinerAction {
-        Itemsets run(String inputPath, double minsup) throws Exception;
-    }
-
-    private CompletableFuture<Itemsets> runMinerAsync(boolean passing, int occurrences,
-                                                      IMinerAction minerAction,
-                                                      Runnable statsPrinter) {
-        int configs = passing ? this.passing : this.failing;
-        double minsup = (double) occurrences / configs;
-        String fileName = passing ? "passingConfigs.txt" : "failingConfigs.txt";
-        String path = basePath + resourcesFolder + fileName;
-
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                return minerAction.run(path, minsup);
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            } finally {
-                synchronized (System.out) {
-                    System.out.println("Stats for itemsets with passing = " + passing);
-                    if (statsPrinter != null) {
-                        statsPrinter.run();
-                    }
+                int[] features = Arrays.stream(itemset.itemset)
+                        .map(feature -> mapFeatureToFeatJARInt(feature, maxFeatureInt))
+                        .sorted()
+                        .toArray();
+                if (features.length >= minT && features.length <= maxT) {
+                    supportPerPattern.put(new BooleanAssignment(features), itemset.getAbsoluteSupport());
                 }
             }
-        });
+        }
+        return supportPerPattern;
     }
+
+    private boolean passesMetricThresholds(
+            BooleanAssignment interaction, List<Object> dependencyList, ContrastMetricCalculator metrics) {
+        return isAboveThreshold(metrics.computeOchiai(interaction), MIN_OCHIAI.get(dependencyList))
+                && isAboveThreshold(metrics.computeGrowthRate(interaction), MIN_GROWTH_RATE.get(dependencyList))
+                && isAboveThreshold(metrics.computeDStar(interaction, 2.0), MIN_DSTAR.get(dependencyList))
+                && isAboveThreshold(metrics.computeConfidence(interaction), MIN_CONFIDENCE.get(dependencyList))
+                && isAboveThreshold(metrics.computeLift(interaction), MIN_LIFT.get(dependencyList));
+    }
+
+    private boolean isAboveThreshold(double value, double threshold) {
+        return threshold <= 0.0 || Double.isNaN(threshold) || (!Double.isNaN(value) && value >= threshold);
+    }
+
+    private Comparator<BooleanAssignment> interactionComparator(ContrastMetricCalculator metrics) {
+        return (left, right) -> {
+            int scoreComparison = Double.compare(
+                    normalizedScore(metrics.computeOchiai(right)), normalizedScore(metrics.computeOchiai(left)));
+            return scoreComparison != 0 ? scoreComparison : compareAssignments(left, right);
+        };
+    }
+
+    private double normalizedScore(double score) {
+        return Double.isNaN(score) ? Double.NEGATIVE_INFINITY : score;
+    }
+
+    private int compareAssignments(BooleanAssignment left, BooleanAssignment right) {
+        int[] leftFeatures = left.get();
+        int[] rightFeatures = right.get();
+        for (int i = 0; i < Math.min(leftFeatures.length, rightFeatures.length); i++) {
+            int comparison = Integer.compare(leftFeatures[i], rightFeatures[i]);
+            if (comparison != 0) {
+                return comparison;
+            }
+        }
+        return Integer.compare(leftFeatures.length, rightFeatures.length);
+    }
+
 }

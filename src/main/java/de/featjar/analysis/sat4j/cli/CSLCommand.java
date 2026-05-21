@@ -12,65 +12,96 @@ import de.featjar.formula.assignment.BooleanAssignmentGroups;
 import de.featjar.formula.assignment.BooleanAssignmentList;
 import de.featjar.formula.io.BooleanAssignmentGroupsFormats;
 import de.featjar.formula.io.dimacs.BooleanAssignmentListDimacsFormat;
-
 import java.nio.file.Path;
 import java.util.Optional;
 
 public class CSLCommand extends ASAT4JAnalysisCommand<BooleanAssignmentList> {
 
-    public final Option<Path> FAILING_CONFIGS_OPTION = Option.newOption("f", Option.PathParser)
-            .setDescription("Set of failing initial configurations.")
-            .setDefaultValue(null)
+    public static final Option<Path> FAILING_CONFIGS_OPTION = Option.newOption("fc", Option.PathParser)
+            .setDescription("Path to the file containing all failing configurations of the sample.")
             .setValidator(Option.PathValidator);
 
-    public final Option<Path> PASSING_CONFIGS_OPTION = Option.newOption("p", Option.PathParser)
-            .setDescription("Set of passing initial configurations.")
-            .setDefaultValue(null)
+    public static final Option<Path> PASSING_CONFIGS_OPTION = Option.newOption("pc", Option.PathParser)
+            .setDescription("Path to the file containing all passing configurations of the sample.")
             .setValidator(Option.PathValidator);
 
-    public final Option<Double> MINSUPP_OPTION = Option.newOption("s", Option.DoubleParser)
-            .setDescription("Minimal support threshold for each pattern.")
-            .setDefaultValue(0.01);
+    public static final Option<Integer> MIN_T_OPTION = Option.newOption("min-t", Option.IntegerParser)
+            .setDescription("Minimum interaction size.")
+            .setValidator(t -> t > 0)
+            .setDefaultValue(1);
 
-    public final Option<Double> MINCONF_OPTION = Option.newOption("c", Option.DoubleParser)
-            .setDescription("Minimal confidence threshold for each pattern.")
-            .setDefaultValue(0.01);
+    public static final Option<Integer> MAX_T_OPTION = Option.newOption("t", Option.IntegerParser)
+            .setDescription("Maximum interaction size.")
+            .setValidator(t -> t > 0)
+            .setDefaultValue(3);
 
-    public final Option<Integer> T_OPTION = Option.newOption("t", Option.IntegerParser)
-            .setDescription("Maximum interaction size t.")
-            .setDefaultValue(2);
+    public static final Option<CSL.Algorithm> ALGORITHM_OPTION = Option.newEnumOption("A", CSL.Algorithm.class)
+            .setDescription("Pattern mining algorithm.")
+            .setDefaultValue(CSL.Algorithm.APRIORI_FAST);
 
+    public static final Option<Integer> MINSUP_OPTION = Option.newOption("ms", Option.IntegerParser)
+            .setDescription("Minimal absolute support for each interaction.")
+            .setValidator(support -> support > 0)
+            .setDefaultValue(1);
+
+    public static final Option<Integer> MAXSUP_OPTION = Option.newOption("mx", Option.IntegerParser)
+            .setDescription("Maximal absolute support. Only used by APRIORI_FAST_INVERSE.")
+            .setValidator(support -> support > 0)
+            .setDefaultValue(Integer.MAX_VALUE);
+
+    public static final Option<Double> MIN_OCHIAI_OPTION = Option.newOption("ochiai", Option.DoubleParser)
+            .setDescription("Minimal Ochiai threshold.")
+            .setDefaultValue(0.0);
+
+    public static final Option<Double> MIN_GROWTH_RATE_OPTION = Option.newOption("gr", Option.DoubleParser)
+            .setDescription("Minimal growth-rate threshold.")
+            .setDefaultValue(0.0);
+
+    public static final Option<Double> MIN_DSTAR_OPTION = Option.newOption("dstar", Option.DoubleParser)
+            .setDescription("Minimal DStar threshold.")
+            .setDefaultValue(0.0);
+
+    public static final Option<Double> MIN_CONFIDENCE_OPTION = Option.newOption("conf", Option.DoubleParser)
+            .setDescription("Minimal confidence threshold.")
+            .setDefaultValue(0.0);
+
+    public static final Option<Double> MIN_LIFT_OPTION = Option.newOption("lift", Option.DoubleParser)
+            .setDescription("Minimal lift threshold.")
+            .setDefaultValue(0.0);
 
 
     @Override
     protected IComputation<BooleanAssignmentList> newAnalysis(
             OptionList optionParser, IComputation<BooleanAssignmentList> formula) {
-        /*
         IComputation<BooleanAssignmentList> analysis = formula.map(CSL::new)
-                .set(this.RANDOM_SEED, optionParser.get(RANDOM_SEED_OPTION))
-                .set(CSL.MINSUPP, optionParser.get(MINSUPP_OPTION))
-                .set(CSL.MINCONF, optionParser.get(MINCONF_OPTION))
-                .set(CSL.T,  optionParser.get(T_OPTION));
+                .set(CSL.RANDOM_SEED, optionParser.get(RANDOM_SEED_OPTION))
+                .set(CSL.SAT_TIMEOUT, optionParser.get(SAT_TIMEOUT_OPTION))
+                .set(CSL.MIN_T, optionParser.get(MIN_T_OPTION))
+                .set(CSL.MAX_T, optionParser.get(MAX_T_OPTION))
+                .set(CSL.MINSUP, optionParser.get(MINSUP_OPTION))
+                .set(CSL.MAXSUP, optionParser.get(MAXSUP_OPTION))
+                .set(CSL.ALGORITHM, optionParser.get(ALGORITHM_OPTION))
+                .set(CSL.MIN_OCHIAI, optionParser.get(MIN_OCHIAI_OPTION))
+                .set(CSL.MIN_GROWTH_RATE, optionParser.get(MIN_GROWTH_RATE_OPTION))
+                .set(CSL.MIN_DSTAR, optionParser.get(MIN_DSTAR_OPTION))
+                .set(CSL.MIN_CONFIDENCE, optionParser.get(MIN_CONFIDENCE_OPTION))
+                .set(CSL.MIN_LIFT, optionParser.get(MIN_LIFT_OPTION));
 
-    Result<Path> failingConfigsPath = optionParser.getResult(FAILING_CONFIGS_OPTION);
-    Result<Path> passingConfigsPath = optionParser.getResult(PASSING_CONFIGS_OPTION);
-    if (failingConfigsPath.isPresent() && passingConfigsPath.isPresent()) {
-        BooleanAssignmentGroups failingConfigs = IO.load(
-                    failingConfigsPath.get(), BooleanAssignmentGroupsFormats.getInstance())
-                .orElseLog(Log.Verbosity.WARNING);
-        BooleanAssignmentGroups passingConfigs = IO.load(
-                        passingConfigsPath.get(), BooleanAssignmentGroupsFormats.getInstance())
-                .orElseLog(Log.Verbosity.WARNING);
+        loadConfigs(optionParser.getResult(FAILING_CONFIGS_OPTION))
+                .ifPresent(configs -> analysis.set(CSL.FAILING_CONFIGS, configs));
+        loadConfigs(optionParser.getResult(PASSING_CONFIGS_OPTION))
+                .ifPresent(configs -> analysis.set(CSL.PASSING_CONFIGS, configs));
 
-        if (failingConfigs != null && passingConfigs != null) {
-            analysis.set(CSL.FAILING_CONFIGS, failingConfigs.getFirstGroup());
-            analysis.set(CSL.PASSING_CONFIGS, passingConfigs.getFirstGroup());
-        }
+        return analysis;
     }
-        return analysis.mapResult(CSL.class, "list", BooleanAssignmentList::new);
 
-         */
-        return null;
+    private Optional<BooleanAssignmentList> loadConfigs(Result<Path> path) {
+        if (path.isEmpty()) {
+            return Optional.empty();
+        }
+        BooleanAssignmentGroups configs =
+                IO.load(path.get(), BooleanAssignmentGroupsFormats.getInstance()).orElseLog(Log.Verbosity.WARNING);
+        return configs != null ? Optional.of(configs.getFirstGroup()) : Optional.empty();
     }
 
     @Override
@@ -80,11 +111,11 @@ public class CSLCommand extends ASAT4JAnalysisCommand<BooleanAssignmentList> {
 
     @Override
     public Optional<String> getDescription() {
-        return Optional.of("Identifies a list of potential faulty complex feature interactions.");
+        return Optional.of("Identifies potential faulty complex feature interactions with contrast-set mining.");
     }
 
     @Override
     public Optional<String> getShortName() {
-        return Optional.of("CSL");
+        return Optional.of("csl");
     }
 }

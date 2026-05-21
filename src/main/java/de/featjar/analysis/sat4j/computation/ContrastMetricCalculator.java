@@ -47,6 +47,20 @@ public class ContrastMetricCalculator {
         return growthRate;
     }
 
+    public Double computeConfidence(BooleanAssignment interaction) {
+        int fails = this.supportPerFailingInteraction.getOrDefault(interaction, 0);
+        int passes = this.supportPerPassingInteraction.getOrDefault(interaction, 0);
+        int totalSupport = fails + passes;
+        return totalSupport == 0 ? 0.0 : (double) fails / totalSupport;
+    }
+
+    public Double computeLift(BooleanAssignment interaction) {
+        int totalConfigs = passingConfigs + failingConfigs;
+        if (totalConfigs == 0 || failingConfigs == 0) return 0.0;
+        double baseFailureRate = (double) failingConfigs / totalConfigs;
+        return computeConfidence(interaction) / baseFailureRate;
+    }
+
     public List<Pair<BooleanAssignment, Double>> mapInteractions(
             Collection<BooleanAssignment> interactions,
             Function<BooleanAssignment, Double> metric) {
@@ -55,4 +69,3 @@ public class ContrastMetricCalculator {
                 .collect(Collectors.toList());
     }
 }
-
