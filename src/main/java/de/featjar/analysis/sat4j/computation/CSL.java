@@ -497,33 +497,142 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
         }
 
         private String serialize(List<ScoredInteraction> interactions) {
-            StringBuilder builder = new StringBuilder();
-
-            builder.append("rank\tinteraction\tfeatures\tpass\tfail\tochiai\tgrowth_rate\tdstar\tconfidence\tlift\n");
-            int rank = 1;
-            for (ScoredInteraction interaction : interactions) {
-                builder.append(rank++)
-                        .append('\t')
-                        .append(interaction.getInteraction().print())
-                        .append('\t')
-                        .append(formatFeatureNames(interaction.getInteraction()))
-                        .append('\t')
-                        .append(interaction.getPassingSupport())
-                        .append('\t')
-                        .append(interaction.getFailingSupport())
-                        .append('\t')
-                        .append(formatMetric(interaction.getOchiai()))
-                        .append('\t')
-                        .append(formatMetric(interaction.getGrowthRate()))
-                        .append('\t')
-                        .append(formatMetric(interaction.getDStar()))
-                        .append('\t')
-                        .append(formatMetric(interaction.getConfidence()))
-                        .append('\t')
-                        .append(formatMetric(interaction.getLift()))
-                        .append('\n');
+            if (interactions == null || interactions.isEmpty()) {
+                return "No interactions to serialize.\n";
             }
+
+            // 1. Erster Durchlauf: Einzelne Features/Interaktionen auftrennen
+            List<String[]> splitInteractions = new ArrayList<>(interactions.size());
+            List<String[]> splitFeatures = new ArrayList<>(interactions.size());
+
+            int maxIntItems = 0;
+            int maxFeatItems = 0;
+
+            for (ScoredInteraction interaction : interactions) {
+                // Trennt z.B. "-13,+18" beim Komma
+                String[] intParts = interaction.getInteraction().print().split(",");
+                splitInteractions.add(intParts);
+                maxIntItems = Math.max(maxIntItems, intParts.length);
+
+                // Trennt "not-Time15 Register20" beim Leerzeichen
+                String[] featParts = formatFeatureNames(interaction.getInteraction()).split("\\s+");
+                splitFeatures.add(featParts);
+                maxFeatItems = Math.max(maxFeatItems, featParts.length);
+            }
+
+            // 2. Maximale Spaltenbreiten ermitteln (Startwerte = Länge der Spalten-Header)
+            int rankW = 4;
+            int passW = 4;
+            int failW = 4;
+            int ochiaiW = 6;
+            int growthW = 11;
+            int dstarW = 5;
+            int confW = 10;
+            int liftW = 4;
+
+            // Arrays für die Breiten der einzelnen "Unter-Features"
+            int[] intW = new int[maxIntItems];
+            int[] featW = new int[maxFeatItems];
+
+            int rankIdx = 1;
+            for (int i = 0; i < interactions.size(); i++) {
+                ScoredInteraction inter = interactions.get(i);
+                String[] intParts = splitInteractions.get(i);
+                String[] featParts = splitFeatures.get(i);
+
+                rankW = Math.max(rankW, String.valueOf(rankIdx++).length());
+
+                for (int j = 0; j < intParts.length; j++) {
+                    intW[j] = Math.max(intW[j], intParts[j].length());
+                }
+                for (int j = 0; j < featParts.length; j++) {
+                    featW[j] = Math.max(featW[j], featParts[j].length());
+                }
+
+                passW = Math.max(passW, String.valueOf(inter.getPassingSupport()).length());
+                failW = Math.max(failW, String.valueOf(inter.getFailingSupport()).length());
+                ochiaiW = Math.max(ochiaiW, formatMetric(inter.getOchiai()).length());
+                growthW = Math.max(growthW, formatMetric(inter.getGrowthRate()).length());
+                dstarW = Math.max(dstarW, formatMetric(inter.getDStar()).length());
+                confW = Math.max(confW, formatMetric(inter.getConfidence()).length());
+                liftW = Math.max(liftW, formatMetric(inter.getLift()).length());
+            }
+
+            // Gesamtbreite für die gruppierten Spalten berechnen (Features + Leerzeichen dazwischen)
+            int totalIntColsWidth = Math.max(11, Arrays.stream(intW).sum() + maxIntItems - 1); // 11 = "interaction"
+            int totalFeatColsWidth = Math.max(8, Arrays.stream(featW).sum() + maxFeatItems - 1); // 8 = "features"
+
+            // 3. Zweiter Durchlauf: Tabelle zusammenbauen
+            StringBuilder builder = new StringBuilder();
+            String sep = " | "; // Klare optische Trennung
+
+            // Header (Zahlen rechtsbündig, Text linksbündig für bessere Lesbarkeit)
+            builder.append(alignRight("rank", rankW)).append(sep)
+                    .append(alignLeft("interaction", totalIntColsWidth)).append(sep)
+                    .append(alignLeft("features", totalFeatColsWidth)).append(sep)
+                    .append(alignRight("pass", passW)).append(sep)
+                    .append(alignRight("fail", failW)).append(sep)
+                    .append(alignRight("ochiai", ochiaiW)).append(sep)
+                    .append(alignRight("growth_rate", growthW)).append(sep)
+                    .append(alignRight("dstar", dstarW)).append(sep)
+                    .append(alignRight("confidence", confW)).append(sep)
+                    .append(alignRight("lift", liftW)).append('\n');
+
+            // ASCII-Trennlinie
+            builder.append("-".repeat(rankW)).append("-+-")
+                    .append("-".repeat(totalIntColsWidth)).append("-+-")
+                    .append("-".repeat(totalFeatColsWidth)).append("-+-")
+                    .append("-".repeat(passW)).append("-+-")
+                    .append("-".repeat(failW)).append("-+-")
+                    .append("-".repeat(ochiaiW)).append("-+-")
+                    .append("-".repeat(growthW)).append("-+-")
+                    .append("-".repeat(dstarW)).append("-+-")
+                    .append("-".repeat(confW)).append("-+-")
+                    .append("-".repeat(liftW)).append('\n');
+
+            // Daten eintragen
+            rankIdx = 1;
+            for (int i = 0; i < interactions.size(); i++) {
+                ScoredInteraction inter = interactions.get(i);
+                String[] intParts = splitInteractions.get(i);
+                String[] featParts = splitFeatures.get(i);
+
+                builder.append(alignRight(String.valueOf(rankIdx++), rankW)).append(sep)
+                        .append(formatGroup(intParts, intW, totalIntColsWidth)).append(sep)
+                        .append(formatGroup(featParts, featW, totalFeatColsWidth)).append(sep)
+                        .append(alignRight(String.valueOf(inter.getPassingSupport()), passW)).append(sep)
+                        .append(alignRight(String.valueOf(inter.getFailingSupport()), failW)).append(sep)
+                        .append(alignRight(formatMetric(inter.getOchiai()), ochiaiW)).append(sep)
+                        .append(alignRight(formatMetric(inter.getGrowthRate()), growthW)).append(sep)
+                        .append(alignRight(formatMetric(inter.getDStar()), dstarW)).append(sep)
+                        .append(alignRight(formatMetric(inter.getConfidence()), confW)).append(sep)
+                        .append(alignRight(formatMetric(inter.getLift()), liftW)).append('\n');
+            }
+
             return builder.toString();
+        }
+
+// === Hilfsmethoden für das Alignment ===
+
+        private String alignLeft(String s, int width) {
+            return String.format("%-" + width + "s", s);
+        }
+
+        private String alignRight(String s, int width) {
+            return String.format("%" + width + "s", s);
+        }
+
+        // Baut die Feature-Strings so zusammen, dass jedes n-te Feature exakt übereinander steht
+        private String formatGroup(String[] parts, int[] widths, int totalWidth) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < widths.length; i++) {
+                String part = (i < parts.length) ? parts[i] : ""; // Falls diese Zeile weniger Features hat als das Maximum
+                sb.append(alignLeft(part, widths[i]));
+                if (i < widths.length - 1) {
+                    sb.append(" ");
+                }
+            }
+            return alignLeft(sb.toString(), totalWidth); // Restlichen Platz bis zur Header-Breite auffüllen
         }
 
         private String formatFeatureNames(BooleanAssignment interaction) {
