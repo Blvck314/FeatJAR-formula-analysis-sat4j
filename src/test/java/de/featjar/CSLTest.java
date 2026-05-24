@@ -19,7 +19,7 @@ import de.featjar.formula.combination.VariableCombinationSpecification;
 import de.featjar.formula.computation.ComputeCNFFormula;
 import de.featjar.formula.computation.ComputeNNFFormula;
 import de.featjar.formula.io.FormulaFormats;
-import de.featjar.formula.io.dimacs.BooleanAssignmentGroupsDimacsListFormat;
+import de.featjar.formula.io.csv.BooleanAssignmentGroupsCSVFormat;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -194,7 +194,7 @@ public class CSLTest {
     }
 
     private static void writeConfigs(BooleanAssignmentList configs, Path path) throws IOException {
-        IO.save(new BooleanAssignmentGroups(configs), path, new BooleanAssignmentGroupsDimacsListFormat());
+        IO.save(new BooleanAssignmentGroups(configs), path, new BooleanAssignmentGroupsCSVFormat());
     }
 
     public class EvaluationHarness {
