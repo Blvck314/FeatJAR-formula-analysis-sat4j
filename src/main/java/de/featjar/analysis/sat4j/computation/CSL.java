@@ -16,30 +16,36 @@ import de.featjar.formula.assignment.BooleanAssignment;
 import de.featjar.formula.assignment.BooleanAssignmentList;
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
+import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
 /**
  * Mines contrast-set-like feature interactions from passing and failing configurations.
  */
-public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
+public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
 
     public enum Algorithm {
         APRIORI_FAST,
         APRIORI_FAST_CLOSE,
         APRIORI_FAST_INVERSE,
         FP_GROWTH
+    }
+
+    public enum RankingMetric {
+        OCHIAI,
+        GROWTH_RATE,
+        DSTAR,
+        CONFIDENCE,
+        LIFT
     }
 
     public static final Dependency<BooleanAssignmentList> PASSING_CONFIGS =
@@ -86,10 +92,10 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
     }
 
     @Override
-    public Result<BooleanAssignmentList> compute(List<Object> dependencyList, Progress progress) {
+    public Result<CSLResult> compute(List<Object> dependencyList, Progress progress) {
         BooleanAssignmentList clauseList = BOOLEAN_CLAUSE_LIST.get(dependencyList);
-        BooleanAssignmentList passingConfigs = PASSING_CONFIGS.get(dependencyList);
-        BooleanAssignmentList failingConfigs = FAILING_CONFIGS.get(dependencyList);
+        BooleanAssignmentList passingConfigs = adaptVariableMap(PASSING_CONFIGS.get(dependencyList), clauseList);
+        BooleanAssignmentList failingConfigs = adaptVariableMap(FAILING_CONFIGS.get(dependencyList), clauseList);
         BooleanAssignment coreFeatures = CORE_FEATURES.get(dependencyList);
         int minT = MIN_T.get(dependencyList);
         int maxT = MAX_T.get(dependencyList);
@@ -97,13 +103,60 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         int maxsup = MAXSUP.get(dependencyList);
         Algorithm algorithm = ALGORITHM.get(dependencyList);
 
-        if (passingConfigs.getVariableMap() == null) {
-            passingConfigs = new BooleanAssignmentList(clauseList.getVariableMap(), passingConfigs.getAll());
-        }
-        if (failingConfigs.getVariableMap() == null) {
-            failingConfigs = new BooleanAssignmentList(clauseList.getVariableMap(), failingConfigs.getAll());
+        Result<?> validationResult = validate(failingConfigs, minT, maxT, minsup, maxsup, algorithm);
+        if (validationResult.isEmpty()) {
+            return validationResult.nullify();
         }
 
+        boolean[] coreFeatureMask = toCoreFeatureMask(coreFeatures, clauseList.getVariableMap().size());
+
+        progress.setTotalSteps(4);
+        progress.incrementCurrentStep();
+        checkCancel();
+
+        try {
+            MiningInput passingInput = prepareMiningInput(passingConfigs, coreFeatureMask);
+            MiningInput failingInput = prepareMiningInput(failingConfigs, coreFeatureMask);
+            progress.incrementCurrentStep();
+            checkCancel();
+
+            CompletableFuture<Itemsets> passingFuture =
+                    runMinerAsync(passingInput, minT, maxT, minsup, maxsup, algorithm);
+            CompletableFuture<Itemsets> failingFuture =
+                    runMinerAsync(failingInput, minT, maxT, minsup, maxsup, algorithm);
+
+            CompletableFuture<HashMap<InteractionKey, SupportCounts>> failingMapFuture = failingFuture.thenApplyAsync(
+                    failingItemsets -> getFailingInteractionSupports(failingItemsets, minT, maxT));
+
+            ContrastMetricCalculator metrics = new ContrastMetricCalculator(passingConfigs.size(), failingConfigs.size());
+            CompletableFuture<List<InteractionResult>> resultsFuture = failingMapFuture.thenCombineAsync(
+                    passingFuture,
+                    (supportTable, passingItemsets) -> scoreInteractions(
+                            supportTable, passingItemsets, minT, maxT, dependencyList, metrics));
+
+            List<InteractionResult> results = resultsFuture.join();
+            progress.incrementCurrentStep();
+            checkCancel();
+
+            results.sort(interactionResultComparator());
+            CSLResult result = toCSLResult(results, clauseList.getVariableMap());
+
+            progress.incrementCurrentStep();
+            return Result.of(result);
+        } catch (Exception e) {
+            return Result.empty(e);
+        }
+    }
+
+    private BooleanAssignmentList adaptVariableMap(BooleanAssignmentList configs, BooleanAssignmentList clauseList) {
+        if (configs.getVariableMap() == null) {
+            return new BooleanAssignmentList(clauseList.getVariableMap(), configs.getAll());
+        }
+        return configs;
+    }
+
+    private Result<?> validate(
+            BooleanAssignmentList failingConfigs, int minT, int maxT, int minsup, int maxsup, Algorithm algorithm) {
         if (failingConfigs.isEmpty()) {
             return Result.empty(new IllegalArgumentException("No failing configurations specified."));
         }
@@ -116,73 +169,45 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         if (algorithm == Algorithm.APRIORI_FAST_INVERSE && maxsup < minsup) {
             return Result.empty(new IllegalArgumentException("Maximum support must be at least the minimum support."));
         }
-
-        Set<Integer> coreFeatureSet =
-                Arrays.stream(coreFeatures.get()).boxed().collect(Collectors.toCollection(LinkedHashSet::new));
-        BooleanAssignmentList minedPassingConfigs = removeFromConfigs(passingConfigs, coreFeatureSet);
-        BooleanAssignmentList minedFailingConfigs = removeFromConfigs(failingConfigs, coreFeatureSet);
-
-        progress.setTotalSteps(3);
-        progress.incrementCurrentStep();
-        checkCancel();
-
-        try {
-            CompletableFuture<Map<BooleanAssignment, Integer>> passingFuture =
-                    CompletableFuture.supplyAsync(() -> mine(minedPassingConfigs, minT, maxT, minsup, maxsup, algorithm));
-            CompletableFuture<Map<BooleanAssignment, Integer>> failingFuture =
-                    CompletableFuture.supplyAsync(() -> mine(minedFailingConfigs, minT, maxT, minsup, maxsup, algorithm));
-
-            Map<BooleanAssignment, Integer> supportPerPassingInteraction = passingFuture.join();
-            Map<BooleanAssignment, Integer> supportPerFailingInteraction = failingFuture.join();
-
-            progress.incrementCurrentStep();
-            checkCancel();
-
-            LinkedHashSet<BooleanAssignment> interactions = new LinkedHashSet<>(supportPerFailingInteraction.keySet());
-            interactions.removeAll(supportPerPassingInteraction.keySet());
-
-            ContrastMetricCalculator metrics = new ContrastMetricCalculator(
-                    passingConfigs.size(),
-                    failingConfigs.size(),
-                    supportPerPassingInteraction,
-                    supportPerFailingInteraction);
-            List<BooleanAssignment> result = interactions.stream()
-                    .filter(interaction -> passesMetricThresholds(interaction, dependencyList, metrics))
-                    .sorted(interactionComparator(metrics))
-                    .collect(Collectors.toCollection(ArrayList::new));
-
-            progress.incrementCurrentStep();
-            return Result.of(new BooleanAssignmentList(clauseList.getVariableMap(), result));
-        } catch (Exception e) {
-            return Result.empty(e);
-        }
+        return Result.of(Boolean.TRUE);
     }
 
-    private Map<BooleanAssignment, Integer> mine(
-            BooleanAssignmentList configs, int minT, int maxT, int minsup, int maxsup, Algorithm algorithm) {
-        if (configs.isEmpty()) {
-            return new LinkedHashMap<>();
-        }
-
-        Path inputPath = null;
-        try {
-            inputPath = Files.createTempFile("featjar-csl-", ".transactions");
-            writeConfigsToFile(configs, inputPath);
-            Itemsets itemsets = runMiner(inputPath, configs.size(), minT, maxT, minsup, maxsup, algorithm);
-            return transformPatterns(itemsets, configs.getVariableMap().size(), minT, maxT);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        } finally {
-            if (inputPath != null) {
-                try {
-                    Files.deleteIfExists(inputPath);
-                } catch (IOException ignored) {
-                }
+    private boolean[] toCoreFeatureMask(BooleanAssignment coreFeatures, int variableCount) {
+        boolean[] coreFeatureMask = new boolean[variableCount + 1];
+        for (int feature : coreFeatures.get()) {
+            int variable = Math.abs(feature);
+            if (variable < coreFeatureMask.length) {
+                coreFeatureMask[variable] = true;
             }
         }
+        return coreFeatureMask;
     }
 
-    private Itemsets runMiner(Path inputPath, int configCount, int minT, int maxT, int minsup, int maxsup, Algorithm algorithm)
+    private MiningInput prepareMiningInput(BooleanAssignmentList configs, boolean[] coreFeatureMask) throws IOException {
+        Path inputPath = Files.createTempFile("featjar-csl-", ".transactions");
+        writeConfigsToFile(configs, inputPath, coreFeatureMask);
+        return new MiningInput(inputPath, configs.size());
+    }
+
+    private CompletableFuture<Itemsets> runMinerAsync(
+            MiningInput input, int minT, int maxT, int minsup, int maxsup, Algorithm algorithm) {
+        if (input.configCount == 0) {
+            input.delete();
+            return CompletableFuture.completedFuture(new Itemsets("empty"));
+        }
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                return runMiner(input.path, input.configCount, minT, maxT, minsup, maxsup, algorithm);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            } finally {
+                input.delete();
+            }
+        });
+    }
+
+    private Itemsets runMiner(
+            Path inputPath, int configCount, int minT, int maxT, int minsup, int maxsup, Algorithm algorithm)
             throws Exception {
         double relativeMinSup = (double) minsup / configCount;
         String input = inputPath.toString();
@@ -211,22 +236,13 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         }
     }
 
-    private BooleanAssignmentList removeFromConfigs(BooleanAssignmentList configs, Set<Integer> featuresToRemove) {
-        return new BooleanAssignmentList(
-                configs.getVariableMap(),
-                configs.stream()
-                        .map(config -> new BooleanAssignment(Arrays.stream(config.get())
-                                .filter(feature -> feature != 0)
-                                .filter(feature -> !featuresToRemove.contains(feature))
-                                .toArray()))
-                        .collect(Collectors.toList()));
-    }
-
-    private void writeConfigsToFile(BooleanAssignmentList configs, Path path) throws IOException {
+    private void writeConfigsToFile(BooleanAssignmentList configs, Path path, boolean[] coreFeatureMask)
+            throws IOException {
         try (BufferedWriter writer = Files.newBufferedWriter(path, Charset.defaultCharset())) {
             for (BooleanAssignment configuration : configs) {
                 int[] features = Arrays.stream(configuration.get())
                         .filter(feature -> feature != 0)
+                        .filter(feature -> !isCoreFeature(feature, coreFeatureMask))
                         .map(this::mapFeatureToPositiveInt)
                         .distinct()
                         .sorted()
@@ -238,6 +254,11 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         }
     }
 
+    private boolean isCoreFeature(int feature, boolean[] coreFeatureMask) {
+        int variable = Math.abs(feature);
+        return variable < coreFeatureMask.length && coreFeatureMask[variable];
+    }
+
     private int mapFeatureToPositiveInt(int feature) {
         return feature < 0 ? Integer.MAX_VALUE + feature : feature;
     }
@@ -246,57 +267,523 @@ public class CSL extends ASAT4JAnalysis.Solution<BooleanAssignmentList> {
         return feature > maxFeatureInt ? -(Integer.MAX_VALUE - feature) : feature;
     }
 
-    private Map<BooleanAssignment, Integer> transformPatterns(Itemsets itemsets, int maxFeatureInt, int minT, int maxT) {
-        Map<BooleanAssignment, Integer> supportPerPattern = new LinkedHashMap<>();
-        for (List<Itemset> level : itemsets.getLevels()) {
+    private HashMap<InteractionKey, SupportCounts> getFailingInteractionSupports(
+            Itemsets failingItemsets, int minT, int maxT) {
+        int failItems = failingItemsets.getLevels().stream().map(List::size).reduce(0, Integer::sum);
+        HashMap<InteractionKey, SupportCounts> supportTable = new HashMap<>((int) (failItems / 0.75f) + 1);
+
+        for (List<Itemset> level : failingItemsets.getLevels()) {
             for (Itemset itemset : level) {
-                int[] features = Arrays.stream(itemset.itemset)
-                        .map(feature -> mapFeatureToFeatJARInt(feature, maxFeatureInt))
-                        .sorted()
-                        .toArray();
-                if (features.length >= minT && features.length <= maxT) {
-                    supportPerPattern.put(new BooleanAssignment(features), itemset.getAbsoluteSupport());
+                if (isInteractionSize(itemset.itemset, minT, maxT)) {
+                    supportTable.put(new InteractionKey(itemset.itemset), new SupportCounts(0, itemset.getAbsoluteSupport()));
                 }
             }
         }
-        return supportPerPattern;
+        return supportTable;
     }
 
-    private boolean passesMetricThresholds(
-            BooleanAssignment interaction, List<Object> dependencyList, ContrastMetricCalculator metrics) {
-        return isAboveThreshold(metrics.computeOchiai(interaction), MIN_OCHIAI.get(dependencyList))
-                && isAboveThreshold(metrics.computeGrowthRate(interaction), MIN_GROWTH_RATE.get(dependencyList))
-                && isAboveThreshold(metrics.computeDStar(interaction, 2.0), MIN_DSTAR.get(dependencyList))
-                && isAboveThreshold(metrics.computeConfidence(interaction), MIN_CONFIDENCE.get(dependencyList))
-                && isAboveThreshold(metrics.computeLift(interaction), MIN_LIFT.get(dependencyList));
+
+    private List<InteractionResult> scoreInteractions(
+            HashMap<InteractionKey, SupportCounts> supportTable,
+            Itemsets passingItemsets,
+            int minT,
+            int maxT,
+            List<Object> dependencyList,
+            ContrastMetricCalculator metrics) {
+        updatePassingSupports(supportTable, passingItemsets, minT, maxT);
+
+        List<InteractionResult> results = new ArrayList<>(supportTable.size());
+        for (java.util.Map.Entry<InteractionKey, SupportCounts> entry : supportTable.entrySet()) {
+            SupportCounts counts = entry.getValue();
+            InteractionResult result = new InteractionResult(
+                    entry.getKey(),
+                    counts.pass,
+                    counts.fail,
+                    metrics.computeOchiai(counts.pass, counts.fail),
+                    metrics.computeGrowthRate(counts.pass, counts.fail),
+                    metrics.computeDStar(counts.pass, counts.fail, 2.0),
+                    metrics.computeConfidence(counts.pass, counts.fail),
+                    metrics.computeLift(counts.pass, counts.fail));
+            if (passesMetricThresholds(result, dependencyList)) {
+                results.add(result);
+            }
+        }
+        return results;
+    }
+
+    private void updatePassingSupports(
+            HashMap<InteractionKey, SupportCounts> supportTable, Itemsets passingItemsets, int minT, int maxT) {
+        for (List<Itemset> level : passingItemsets.getLevels()) {
+            for (Itemset itemset : level) {
+                SupportCounts counts = supportTable.get(new InteractionKey(itemset.itemset));
+                if (counts != null) {
+                    counts.pass = itemset.getAbsoluteSupport();
+                }
+            }
+        }
+    }
+
+    private boolean isInteractionSize(int[] interaction, int minT, int maxT) {
+        return interaction.length >= minT && interaction.length <= maxT;
+    }
+
+    private boolean passesMetricThresholds(InteractionResult result, List<Object> dependencyList) {
+        return isAboveThreshold(result.ochiai, MIN_OCHIAI.get(dependencyList))
+                && isAboveThreshold(result.growthRate, MIN_GROWTH_RATE.get(dependencyList))
+                && isAboveThreshold(result.dStar, MIN_DSTAR.get(dependencyList))
+                && isAboveThreshold(result.confidence, MIN_CONFIDENCE.get(dependencyList))
+                && isAboveThreshold(result.lift, MIN_LIFT.get(dependencyList));
     }
 
     private boolean isAboveThreshold(double value, double threshold) {
         return threshold <= 0.0 || Double.isNaN(threshold) || (!Double.isNaN(value) && value >= threshold);
     }
 
-    private Comparator<BooleanAssignment> interactionComparator(ContrastMetricCalculator metrics) {
+    private Comparator<InteractionResult> interactionResultComparator() {
         return (left, right) -> {
-            int scoreComparison = Double.compare(
-                    normalizedScore(metrics.computeOchiai(right)), normalizedScore(metrics.computeOchiai(left)));
-            return scoreComparison != 0 ? scoreComparison : compareAssignments(left, right);
+            int scoreComparison = Double.compare(normalizedScore(right.ochiai), normalizedScore(left.ochiai));
+            return scoreComparison != 0 ? scoreComparison : compareAssignments(left.features.array, right.features.array);
         };
     }
 
-    private double normalizedScore(double score) {
+    private static double normalizedScore(double score) {
         return Double.isNaN(score) ? Double.NEGATIVE_INFINITY : score;
     }
 
-    private int compareAssignments(BooleanAssignment left, BooleanAssignment right) {
-        int[] leftFeatures = left.get();
-        int[] rightFeatures = right.get();
-        for (int i = 0; i < Math.min(leftFeatures.length, rightFeatures.length); i++) {
-            int comparison = Integer.compare(leftFeatures[i], rightFeatures[i]);
+    private static int compareAssignments(int[] left, int[] right) {
+        for (int i = 0; i < Math.min(left.length, right.length); i++) {
+            int comparison = Integer.compare(left[i], right[i]);
             if (comparison != 0) {
                 return comparison;
             }
         }
-        return Integer.compare(leftFeatures.length, rightFeatures.length);
+        return Integer.compare(left.length, right.length);
     }
 
+    private CSLResult toCSLResult(List<InteractionResult> results, VariableMap variableMap) {
+        int maxFeatureInt = variableMap.size();
+        List<ScoredInteraction> interactions = results.stream()
+                .map(result -> new ScoredInteraction(
+                        new BooleanAssignment(mapFeaturesToFeatJARInts(result.features.array, maxFeatureInt)),
+                        result.pass,
+                        result.fail,
+                        result.ochiai,
+                        result.growthRate,
+                        result.dStar,
+                        result.confidence,
+                        result.lift))
+                .collect(Collectors.toCollection(ArrayList::new));
+        return new CSLResult(variableMap, interactions);
+    }
+
+    private int[] mapFeaturesToFeatJARInts(int[] features, int maxFeatureInt) {
+        return Arrays.stream(features)
+                .map(feature -> mapFeatureToFeatJARInt(feature, maxFeatureInt))
+                .sorted()
+                .toArray();
+    }
+
+    private static final class MiningInput {
+        private final Path path;
+        private final int configCount;
+
+        private MiningInput(Path path, int configCount) {
+            this.path = path;
+            this.configCount = configCount;
+        }
+
+        private void delete() {
+            try {
+                Files.deleteIfExists(path);
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    private static final class InteractionKey {
+        private final int[] array;
+        private final int hash;
+
+        private InteractionKey(int[] array) {
+            this.array = array;
+            this.hash = Arrays.hashCode(array);
+        }
+
+        @Override
+        public boolean equals(Object other) {
+            if (this == other) return true;
+            if (other == null || getClass() != other.getClass()) return false;
+            return Arrays.equals(array, ((InteractionKey) other).array);
+        }
+
+        @Override
+        public int hashCode() {
+            return hash;
+        }
+    }
+
+    private static final class SupportCounts {
+        private int pass;
+        private int fail;
+
+        private SupportCounts(int pass, int fail) {
+            this.pass = pass;
+            this.fail = fail;
+        }
+    }
+
+    private static final class InteractionResult {
+        private final InteractionKey features;
+        private final int pass;
+        private final int fail;
+        private final double ochiai;
+        private final double growthRate;
+        private final double dStar;
+        private final double confidence;
+        private final double lift;
+
+        private InteractionResult(
+                InteractionKey features,
+                int pass,
+                int fail,
+                double ochiai,
+                double growthRate,
+                double dStar,
+                double confidence,
+                double lift) {
+            this.features = features;
+            this.pass = pass;
+            this.fail = fail;
+            this.ochiai = ochiai;
+            this.growthRate = growthRate;
+            this.dStar = dStar;
+            this.confidence = confidence;
+            this.lift = lift;
+        }
+    }
+
+    public static final class CSLResult {
+        private final VariableMap variableMap;
+        private final List<ScoredInteraction> interactions;
+
+        public CSLResult(VariableMap variableMap, List<ScoredInteraction> interactions) {
+            this.variableMap = variableMap;
+            this.interactions = List.copyOf(interactions);
+        }
+
+        public VariableMap getVariableMap() {
+            return variableMap;
+        }
+
+        public List<ScoredInteraction> getInteractions() {
+            return interactions;
+        }
+
+        public List<ScoredInteraction> getTopInteractions(int k, RankingMetric rankingMetric) {
+            int limit = k <= 0 ? interactions.size() : Math.min(k, interactions.size());
+            return interactions.stream()
+                    .sorted(scoredInteractionComparator(rankingMetric))
+                    .limit(limit)
+                    .collect(Collectors.toList());
+        }
+
+        public String serializeAll(RankingMetric rankingMetric) {
+            return serialize(interactions.stream()
+                    .sorted(scoredInteractionComparator(rankingMetric))
+                    .collect(Collectors.toList()));
+        }
+
+        public String serializeTopK(int k, RankingMetric rankingMetric) {
+            return serialize(getTopInteractions(k, rankingMetric));
+        }
+
+        private String serialize(List<ScoredInteraction> interactions) {
+            if (interactions == null || interactions.isEmpty()) {
+                return "No interactions to serialize.\n";
+            }
+
+            // 1. Erster Durchlauf: Einzelne Features/Interaktionen auftrennen
+            List<String[]> splitInteractions = new ArrayList<>(interactions.size());
+            List<String[]> splitFeatures = new ArrayList<>(interactions.size());
+
+            int maxIntItems = 0;
+            int maxFeatItems = 0;
+
+            for (ScoredInteraction interaction : interactions) {
+                // Trennt z.B. "-13,+18" beim Komma
+                String[] intParts = interaction.getInteraction().print().split(",");
+                splitInteractions.add(intParts);
+                maxIntItems = Math.max(maxIntItems, intParts.length);
+
+                // Trennt "not-Time15 Register20" beim Leerzeichen
+                String[] featParts = formatFeatureNames(interaction.getInteraction()).split("\\s+");
+                splitFeatures.add(featParts);
+                maxFeatItems = Math.max(maxFeatItems, featParts.length);
+            }
+
+            // 2. Maximale Spaltenbreiten ermitteln (Startwerte = Länge der Spalten-Header)
+            int rankW = 4;
+            int passW = 4;
+            int failW = 4;
+            int ochiaiW = 6;
+            int growthW = 11;
+            int dstarW = 5;
+            int confW = 10;
+            int liftW = 4;
+
+            // Arrays für die Breiten der einzelnen "Unter-Features"
+            int[] intW = new int[maxIntItems];
+            int[] featW = new int[maxFeatItems];
+
+            int rankIdx = 1;
+            for (int i = 0; i < interactions.size(); i++) {
+                ScoredInteraction inter = interactions.get(i);
+                String[] intParts = splitInteractions.get(i);
+                String[] featParts = splitFeatures.get(i);
+
+                rankW = Math.max(rankW, String.valueOf(rankIdx++).length());
+
+                for (int j = 0; j < intParts.length; j++) {
+                    intW[j] = Math.max(intW[j], intParts[j].length());
+                }
+                for (int j = 0; j < featParts.length; j++) {
+                    featW[j] = Math.max(featW[j], featParts[j].length());
+                }
+
+                passW = Math.max(passW, String.valueOf(inter.getPassingSupport()).length());
+                failW = Math.max(failW, String.valueOf(inter.getFailingSupport()).length());
+                ochiaiW = Math.max(ochiaiW, formatMetric(inter.getOchiai()).length());
+                growthW = Math.max(growthW, formatMetric(inter.getGrowthRate()).length());
+                dstarW = Math.max(dstarW, formatMetric(inter.getDStar()).length());
+                confW = Math.max(confW, formatMetric(inter.getConfidence()).length());
+                liftW = Math.max(liftW, formatMetric(inter.getLift()).length());
+            }
+
+            // Gesamtbreite für die gruppierten Spalten berechnen (Features + Leerzeichen dazwischen)
+            int totalIntColsWidth = Math.max(11, Arrays.stream(intW).sum() + maxIntItems - 1); // 11 = "interaction"
+            int totalFeatColsWidth = Math.max(8, Arrays.stream(featW).sum() + maxFeatItems - 1); // 8 = "features"
+
+            // 3. Zweiter Durchlauf: Tabelle zusammenbauen
+            StringBuilder builder = new StringBuilder();
+            String sep = " | "; // Klare optische Trennung
+
+            // Header (Zahlen rechtsbündig, Text linksbündig für bessere Lesbarkeit)
+            builder.append(alignRight("rank", rankW)).append(sep)
+                    .append(alignLeft("interaction", totalIntColsWidth)).append(sep)
+                    .append(alignLeft("features", totalFeatColsWidth)).append(sep)
+                    .append(alignRight("pass", passW)).append(sep)
+                    .append(alignRight("fail", failW)).append(sep)
+                    .append(alignRight("ochiai", ochiaiW)).append(sep)
+                    .append(alignRight("growth_rate", growthW)).append(sep)
+                    .append(alignRight("dstar", dstarW)).append(sep)
+                    .append(alignRight("confidence", confW)).append(sep)
+                    .append(alignRight("lift", liftW)).append('\n');
+
+            // ASCII-Trennlinie
+            builder.append("-".repeat(rankW)).append("-+-")
+                    .append("-".repeat(totalIntColsWidth)).append("-+-")
+                    .append("-".repeat(totalFeatColsWidth)).append("-+-")
+                    .append("-".repeat(passW)).append("-+-")
+                    .append("-".repeat(failW)).append("-+-")
+                    .append("-".repeat(ochiaiW)).append("-+-")
+                    .append("-".repeat(growthW)).append("-+-")
+                    .append("-".repeat(dstarW)).append("-+-")
+                    .append("-".repeat(confW)).append("-+-")
+                    .append("-".repeat(liftW)).append('\n');
+
+            // Daten eintragen
+            rankIdx = 1;
+            for (int i = 0; i < interactions.size(); i++) {
+                ScoredInteraction inter = interactions.get(i);
+                String[] intParts = splitInteractions.get(i);
+                String[] featParts = splitFeatures.get(i);
+
+                builder.append(alignRight(String.valueOf(rankIdx++), rankW)).append(sep)
+                        .append(formatGroup(intParts, intW, totalIntColsWidth)).append(sep)
+                        .append(formatGroup(featParts, featW, totalFeatColsWidth)).append(sep)
+                        .append(alignRight(String.valueOf(inter.getPassingSupport()), passW)).append(sep)
+                        .append(alignRight(String.valueOf(inter.getFailingSupport()), failW)).append(sep)
+                        .append(alignRight(formatMetric(inter.getOchiai()), ochiaiW)).append(sep)
+                        .append(alignRight(formatMetric(inter.getGrowthRate()), growthW)).append(sep)
+                        .append(alignRight(formatMetric(inter.getDStar()), dstarW)).append(sep)
+                        .append(alignRight(formatMetric(inter.getConfidence()), confW)).append(sep)
+                        .append(alignRight(formatMetric(inter.getLift()), liftW)).append('\n');
+            }
+
+            return builder.toString();
+        }
+
+// === Hilfsmethoden für das Alignment ===
+
+        private String alignLeft(String s, int width) {
+            return String.format("%-" + width + "s", s);
+        }
+
+        private String alignRight(String s, int width) {
+            return String.format("%" + width + "s", s);
+        }
+
+        // Baut die Feature-Strings so zusammen, dass jedes n-te Feature exakt übereinander steht
+        private String formatGroup(String[] parts, int[] widths, int totalWidth) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < widths.length; i++) {
+                String part = (i < parts.length) ? parts[i] : ""; // Falls diese Zeile weniger Features hat als das Maximum
+                sb.append(alignLeft(part, widths[i]));
+                if (i < widths.length - 1) {
+                    sb.append(" ");
+                }
+            }
+            return alignLeft(sb.toString(), totalWidth); // Restlichen Platz bis zur Header-Breite auffüllen
+        }
+
+        private String formatFeatureNames(BooleanAssignment interaction) {
+            return Arrays.stream(interaction.get())
+                    .mapToObj(feature -> {
+                        String featureName = variableMap.get(Math.abs(feature)).orElse(String.valueOf(Math.abs(feature)));
+                        return feature < 0 ? "not-" + featureName : featureName;
+                    })
+                    .collect(Collectors.joining(" "));
+        }
+
+        private String formatMetric(double value) {
+            return Double.isInfinite(value)
+                    ? String.valueOf(value)
+                    : String.format(java.util.Locale.ROOT, "%.6f", value);
+        }
+
+
+        public void writeAllBuffered(Path outputPath, RankingMetric rankingMetric) throws IOException {
+            // 1. Sortieren: Wir machen eine flache Kopie der Liste und sortieren sie in-place.
+            // Das ist deutlich speicherschonender als Streams, da keine Wrapper-Objekte erzeugt werden.
+            List<ScoredInteraction> sortedInteractions = new ArrayList<>(this.interactions);
+            sortedInteractions.sort(scoredInteractionComparator(rankingMetric));
+
+            // 2. Direkt in die Datei streamen (Gepuffert!)
+            // Ein BufferedWriter sammelt Daten in kleinen Blöcken (z.B. 8KB) und flusht sie dann auf die Platte.
+            try (BufferedWriter bw = Files.newBufferedWriter(outputPath);
+                 PrintWriter out = new PrintWriter(bw)) {
+
+                // Header schreiben
+                out.println("rank\tinteraction\tfeatures\tpass\tfail\tochiai\tgrowth_rate\tdstar\tconfidence\tlift");
+
+                int rank = 1;
+                // Zeile für Zeile schreiben
+                for (ScoredInteraction interaction : sortedInteractions) {
+                    out.print(rank++);
+                    out.print('\t');
+                    out.print(interaction.getInteraction().print());
+                    out.print('\t');
+                    out.print(formatFeatureNames(interaction.getInteraction()));
+                    out.print('\t');
+                    out.print(interaction.getPassingSupport());
+                    out.print('\t');
+                    out.print(interaction.getFailingSupport());
+                    out.print('\t');
+                    out.print(formatMetric(interaction.getOchiai()));
+                    out.print('\t');
+                    out.print(formatMetric(interaction.getGrowthRate()));
+                    out.print('\t');
+                    out.print(formatMetric(interaction.getDStar()));
+                    out.print('\t');
+                    out.print(formatMetric(interaction.getConfidence()));
+                    out.print('\t');
+                    out.print(formatMetric(interaction.getLift()));
+                    out.println(); // Neue Zeile
+                }
+            }
+        }
+
+        @Override
+        public String toString() {
+            return serializeAll(RankingMetric.OCHIAI);
+        }
+    }
+
+    public static final class ScoredInteraction {
+        private final BooleanAssignment interaction;
+        private final int passingSupport;
+        private final int failingSupport;
+        private final double ochiai;
+        private final double growthRate;
+        private final double dStar;
+        private final double confidence;
+        private final double lift;
+
+        public ScoredInteraction(
+                BooleanAssignment interaction,
+                int passingSupport,
+                int failingSupport,
+                double ochiai,
+                double growthRate,
+                double dStar,
+                double confidence,
+                double lift) {
+            this.interaction = interaction;
+            this.passingSupport = passingSupport;
+            this.failingSupport = failingSupport;
+            this.ochiai = ochiai;
+            this.growthRate = growthRate;
+            this.dStar = dStar;
+            this.confidence = confidence;
+            this.lift = lift;
+        }
+
+        public BooleanAssignment getInteraction() {
+            return interaction;
+        }
+
+        public int getPassingSupport() {
+            return passingSupport;
+        }
+
+        public int getFailingSupport() {
+            return failingSupport;
+        }
+
+        public double getOchiai() {
+            return ochiai;
+        }
+
+        public double getGrowthRate() {
+            return growthRate;
+        }
+
+        public double getDStar() {
+            return dStar;
+        }
+
+        public double getConfidence() {
+            return confidence;
+        }
+
+        public double getLift() {
+            return lift;
+        }
+
+        private double getMetric(RankingMetric rankingMetric) {
+            switch (rankingMetric) {
+                case GROWTH_RATE:
+                    return growthRate;
+                case DSTAR:
+                    return dStar;
+                case CONFIDENCE:
+                    return confidence;
+                case LIFT:
+                    return lift;
+                case OCHIAI:
+                default:
+                    return ochiai;
+            }
+        }
+    }
+
+    private static Comparator<ScoredInteraction> scoredInteractionComparator(RankingMetric rankingMetric) {
+        return (left, right) -> {
+            int scoreComparison = Double.compare(
+                    normalizedScore(right.getMetric(rankingMetric)), normalizedScore(left.getMetric(rankingMetric)));
+            return scoreComparison != 0
+                    ? scoreComparison
+                    : compareAssignments(left.getInteraction().get(), right.getInteraction().get());
+        };
+    }
 }
