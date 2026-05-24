@@ -88,12 +88,6 @@ public class CSLCommand extends ASAT4JAnalysisCommand<CSL.CSLResult> {
         boolean parallel = !optionParser.get(NON_PARALLEL);
         Duration timeout = optionParser.get(TIMEOUT_OPTION);
         Path outputPath = optionParser.getResult(OUTPUT_OPTION).orElse(null);
-        if (optionParser.get(INTPUT_COMPRESSION_OPTION)) {
-            ioInputOptions = new IOMapperOptions[] {IOMapperOptions.ZIP_COMPRESSION};
-        }
-        if (optionParser.get(OUTPUT_COMPRESSION_OPTION)) {
-            ioOutputOptions = new IOMapperOptions[] {IOMapperOptions.ZIP_COMPRESSION};
-        }
 
         IComputation<CSL.CSLResult> computation;
         try {
@@ -128,7 +122,7 @@ public class CSLCommand extends ASAT4JAnalysisCommand<CSL.CSLResult> {
                 return FeatJAR.ERROR_WRITING_RESULT;
             }
             try {
-                IO.save(result.get(), outputPath, getOuputFormat(optionParser), ioOutputOptions);
+                writeToOutput(result.get(), getOuputFormat(optionParser), optionParser);
             } catch (IOException e) {
                 FeatJAR.log().error(e);
                 return FeatJAR.ERROR_WRITING_RESULT;
