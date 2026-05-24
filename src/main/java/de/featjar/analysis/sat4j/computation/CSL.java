@@ -16,6 +16,7 @@ import de.featjar.formula.assignment.BooleanAssignment;
 import de.featjar.formula.assignment.BooleanAssignmentList;
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -648,6 +649,48 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
             return Double.isInfinite(value)
                     ? String.valueOf(value)
                     : String.format(java.util.Locale.ROOT, "%.6f", value);
+        }
+
+
+        public void writeAllBuffered(Path outputPath, RankingMetric rankingMetric) throws IOException {
+            // 1. Sortieren: Wir machen eine flache Kopie der Liste und sortieren sie in-place.
+            // Das ist deutlich speicherschonender als Streams, da keine Wrapper-Objekte erzeugt werden.
+            List<ScoredInteraction> sortedInteractions = new ArrayList<>(this.interactions);
+            sortedInteractions.sort(scoredInteractionComparator(rankingMetric));
+
+            // 2. Direkt in die Datei streamen (Gepuffert!)
+            // Ein BufferedWriter sammelt Daten in kleinen Blöcken (z.B. 8KB) und flusht sie dann auf die Platte.
+            try (BufferedWriter bw = Files.newBufferedWriter(outputPath);
+                 PrintWriter out = new PrintWriter(bw)) {
+
+                // Header schreiben
+                out.println("rank\tinteraction\tfeatures\tpass\tfail\tochiai\tgrowth_rate\tdstar\tconfidence\tlift");
+
+                int rank = 1;
+                // Zeile für Zeile schreiben
+                for (ScoredInteraction interaction : sortedInteractions) {
+                    out.print(rank++);
+                    out.print('\t');
+                    out.print(interaction.getInteraction().print());
+                    out.print('\t');
+                    out.print(formatFeatureNames(interaction.getInteraction()));
+                    out.print('\t');
+                    out.print(interaction.getPassingSupport());
+                    out.print('\t');
+                    out.print(interaction.getFailingSupport());
+                    out.print('\t');
+                    out.print(formatMetric(interaction.getOchiai()));
+                    out.print('\t');
+                    out.print(formatMetric(interaction.getGrowthRate()));
+                    out.print('\t');
+                    out.print(formatMetric(interaction.getDStar()));
+                    out.print('\t');
+                    out.print(formatMetric(interaction.getConfidence()));
+                    out.print('\t');
+                    out.print(formatMetric(interaction.getLift()));
+                    out.println(); // Neue Zeile
+                }
+            }
         }
 
         @Override
