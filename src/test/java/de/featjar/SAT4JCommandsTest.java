@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2025 FeatJAR-Development-Team
+ * Copyright (C) 2026 FeatJAR-Development-Team
  *
  * This file is part of FeatJAR-formula-analysis-sat4j.
  *
@@ -39,7 +39,8 @@ public class SAT4JCommandsTest {
                 "--slice",
                 "DirectedWithEdges,DirectedWithNeighbors",
                 "--output",
-                tempFile.toString());
+                tempFile.toString(),
+                "--overwrite");
         Assertions.assertEquals(0, exitCode);
         String output = Files.readString(tempFile);
         Assertions.assertFalse(output.contains("DirectedWithEdges"));
@@ -58,6 +59,7 @@ public class SAT4JCommandsTest {
                 "DirectedOnlyVertices,UndirectedWithEdges,UndirectedWithNeighbors,UndirectedOnlyVertices",
                 "--output",
                 tempFile.toString(),
+                "--overwrite",
                 "--print-stacktrace");
         Assertions.assertEquals(0, exitCode);
         String output = Files.readString(tempFile);
@@ -84,6 +86,7 @@ public class SAT4JCommandsTest {
                 "DirectedWithEdges,DirectedWithNeighbors",
                 "--output",
                 tempFile.toString(),
+                "--overwrite",
                 "--print-stacktrace");
         Assertions.assertEquals(0, exitCode);
         String output = Files.readString(tempFile);

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2025 FeatJAR-Development-Team
+ * Copyright (C) 2026 FeatJAR-Development-Team
  *
  * This file is part of FeatJAR-formula-analysis-sat4j.
  *
@@ -103,7 +103,6 @@ public class TWiseCoverageCommand extends AAnalysisCommand<CoverageStatistic> {
     protected IComputation<CoverageStatistic> newComputation(OptionList optionParser) {
         coverageOnly = optionParser.getResult(COVERAGE_ONLY_OPTION).orElseThrow();
         countOnly = optionParser.getResult(COUNT_ONLY_OPTION).orElseThrow();
-        Path samplePath = optionParser.getResult(INPUT_OPTION).orElseThrow();
 
         if (optionParser.has(FM_OPTION) && optionParser.has(REFERENCE_SAMPLE_OPTION)) {
             throw new IllegalArgumentException("Cannot set " + FM_OPTION.getArgumentName() + " and "
@@ -118,9 +117,8 @@ public class TWiseCoverageCommand extends AAnalysisCommand<CoverageStatistic> {
             throw new IllegalArgumentException("Cannot set " + FM_OPTION.getArgumentName() + " and "
                     + REFERENCE_SAMPLE_OPTION.getArgumentName() + " at the same time!");
         }
-
-        IComputation<BooleanAssignmentList> sample = IO.load(
-                        samplePath, BooleanAssignmentGroupsFormats.getInstance(), ioInputOptions)
+        IComputation<BooleanAssignmentList> sample = readFromInput(
+                        optionParser, BooleanAssignmentGroupsFormats.getInstance())
                 .map(BooleanAssignmentGroups::getFirstGroup)
                 .toComputation();
 
