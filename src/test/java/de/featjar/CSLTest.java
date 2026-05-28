@@ -25,8 +25,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Random;
+
 
 public class CSLTest {
 
@@ -34,20 +34,23 @@ public class CSLTest {
     private static final int RANDOM_SAMPLE_SIZE = 100;
     private static final int YASA_SAMPLE_SIZE = 200;
     private static final int YASA_T = 2;
-    private static final int INTERACTION_SIZE = 1;
-    private static final int CSL_MAX_T = 3;
+    private static final int INTERACTION_SIZE = 2;
+    private static final int CSL_MAX_T = 2;
     private static final int CSL_MINSUP = 1;
     private static final int CSL_MAXSUP = 10;
     private static final int MAX_SIMULATION_ATTEMPTS = 20;
     private static final int TOP_K = 20;
-    private static final CSL.RankingMetric RANKING_METRIC= CSL.RankingMetric.OCHIAI;
-    private static final CSL.Algorithm ALGORITHM = CSL.Algorithm.APRIORI_FAST_INVERSE;
+    private static final CSL.RankingMetric RANKING_METRIC = CSL.RankingMetric.OCHIAI;
+    private static final CSL.Algorithm ALGORITHM = CSL.Algorithm.APRIORI_FAST;
     private static final double MIN_OCHIAI = 0.0;
     private static final double MIN_DSTAR = 0.0;
     private static final double MIN_GROWTH_RATE = 0.0;
     private static final double MIN_CONFIDENCE= 0.0;
     private static final double MIN_LIFT = 0.0;
     private static final String FEATURE_MODEL = "e-shop-model.xml";
+    private static final boolean DO_PREFILTERING = true;
+    private static final CSL.RankingMetric PREFILTER_METRIC = CSL.RankingMetric.OCHIAI;
+    private static final double PREFILTER_THRESHOLD = 0.5;
 
     public static void main(String[] args) throws IOException {
         Path resourcesPath = Path.of(System.getProperty("user.home"), "Documents", "studium", "Bachelorarbeit",
@@ -167,6 +170,9 @@ public class CSLTest {
                 .set(CSL.MIN_DSTAR, MIN_DSTAR)
                 .set(CSL.MIN_CONFIDENCE, MIN_CONFIDENCE)
                 .set(CSL.MIN_LIFT, MIN_LIFT)
+                .set(CSL.DO_PREFILTER, DO_PREFILTERING)
+                .set(CSL.PREFILTER_METRIC, PREFILTER_METRIC)
+                .set(CSL.PREFILTER_THRESHOLD, PREFILTER_THRESHOLD)
                 .computeResult()
                 .orElseThrow();
 
@@ -197,144 +203,38 @@ public class CSLTest {
         IO.save(new BooleanAssignmentGroups(configs), path, new BooleanAssignmentGroupsCSVFormat());
     }
 
-    public class EvaluationHarness {
-
-        // 1. Define a robust configuration record for a single run
-        public class EvaluationConfig {
-            String modelName;
-            BooleanAssignmentList clauses;
-            BooleanAssignment coreFeatures;
-            BooleanAssignmentList sample;
-            // Injected Fault Parameters
-            ARMTester.InteractionType faultType;
-            int[] faultLiterals; // The actual injected interaction e.g., [1, -5]
-            CSL.Algorithm algorithm;
-            int maxT;
-            int minsup;
-            double minOchiai;
-            CSL.RankingMetric targetMetric;
-
-            public EvaluationConfig(String modelName, BooleanAssignmentList clauses, BooleanAssignment coreFeatures, BooleanAssignmentList sample, ARMTester.InteractionType faultType, int[] faultLiterals, CSL.Algorithm algorithm, int maxT, int minsup, double minOchiai, CSL.RankingMetric targetMetric) {
-                this.modelName = modelName;
-                this.clauses = clauses;
-                this.coreFeatures = coreFeatures;
-                this.sample = sample;
-                this.faultType = faultType;
-                this.faultLiterals = faultLiterals;
-                this.algorithm = algorithm;
-                this.maxT = maxT;
-                this.minsup = minsup;
-                this.minOchiai = minOchiai;
-                this.targetMetric = targetMetric;
-            }
-        }
-
-        // 2. Define a metric container to hold the results of a single run
-        public class EvaluationResult {
-            EvaluationConfig config;
-            long executionTimeMs;
-            int totalConfigs;
-            int failingConfigs;
-            int foundInteractionsCount;
-            int rankOfInjectedFault;   // e.g., 1 if it's the top result, -1 if not found
-            double scoreOfInjectedFault;
-            boolean isSuccessful; // true if injected fault was found in top K
-
-            public EvaluationResult(EvaluationConfig config, long executionTimeMs, int totalConfigs, int failingConfigs, int foundInteractionsCount, int rankOfInjectedFault, double scoreOfInjectedFault, boolean isSuccessful) {
-                this.config = config;
-                this.executionTimeMs = executionTimeMs;
-                this.totalConfigs = totalConfigs;
-                this.failingConfigs = failingConfigs;
-                this.foundInteractionsCount = foundInteractionsCount;
-                this.rankOfInjectedFault = rankOfInjectedFault;
-                this.scoreOfInjectedFault = scoreOfInjectedFault;
-                this.isSuccessful = isSuccessful;
-            }
-        }
-
-        /**
-         * Executes a single evaluation scenario based on the provided configuration.
-         * This method contains no hardcoded values; everything is driven by 'config'.
-         */
-        public EvaluationResult evaluateScenario(EvaluationConfig config) {
-            long startTime = System.currentTimeMillis();
-
-            // 1. Setup the tester with the SPECIFIC fault from the config
-            RandomConfigurationUpdater updater = new RandomConfigurationUpdater(config.clauses, 123L);
-            ARMTester tester = new ARMTester(123L, config.clauses, updater, config.coreFeatures, config.sample);
-
-            // Inject the exact fault we want to evaluate
-            tester.simulateInteraction(config.faultType, config.faultLiterals);
-
-            // 2. Split the sample
-            var testedSample = tester.testSample(config.sample);
-            BooleanAssignmentList passingConfigs = testedSample.getFirst();
-            BooleanAssignmentList failingConfigs = testedSample.getSecond();
-
-            // If the fault couldn't be simulated or didn't cause failures, abort early
-            if (failingConfigs.isEmpty()) {
-                return new EvaluationResult(config, System.currentTimeMillis() - startTime,
-                        config.sample.size(), 0, 0, -1, 0.0, false);
-            }
-
-            // 3. Run CSL Analysis
-            CSL.CSLResult cslResult = Computations.of(config.clauses)
-                    .map(CSL::new)
-                    .set(CSL.PASSING_CONFIGS, passingConfigs)
-                    .set(CSL.FAILING_CONFIGS, failingConfigs)
-                    .set(CSL.CORE_FEATURES, config.coreFeatures)
-                    .set(CSL.MIN_T, 1)
-                    .set(CSL.MAX_T, config.maxT)
-                    .set(CSL.MINSUP, config.minsup)
-                    .set(CSL.ALGORITHM, config.algorithm)
-                    .set(CSL.MIN_OCHIAI, config.minOchiai)
-                    // ... set other thresholds to 0.0 to prevent filtering out the target prematurely
-                    .computeResult()
-                    .orElseThrow();
-
-            // 4. Analyze Results
-            List<CSL.ScoredInteraction> sortedResults = cslResult.getTopInteractions(0, config.targetMetric);
-
-            int faultRank = findRankOfInjectedFault(sortedResults, config.faultLiterals);
-            double faultScore = getScoreOfFault(sortedResults, faultRank);
-
-            long executionTime = System.currentTimeMillis() - startTime;
-
-            // 5. Return structured data ready for CSV/TSV aggregation
-            return new EvaluationResult(
-                    config,
-                    executionTime,
-                    config.sample.size(),
-                    failingConfigs.size(),
-                    sortedResults.size(),
-                    faultRank,
-                    faultScore,
-                    (faultRank > 0 && faultRank <= 10) // e.g. success = in top 10
+    public record EvaluationConfig(
+        long seed,
+        int randomSampleSize,
+        int yasaSampleSize,
+        int yasaT,
+        int interactionSize,
+        int cslMaxT,
+        int cslMinsup,
+        int cslMaxsup,
+        int maxSimulationAttempts,
+        int topK,
+        CSL.RankingMetric rankingMetric,
+        CSL.Algorithm algorithm,
+        double minOchiai,
+        double minDstar,
+        double minGrowthRate,
+        double minConfidence,
+        double minLift,
+        String featureModel,
+        boolean doPrefiltering,
+        CSL.RankingMetric prefilterMetric,
+        double prefilterThreshold
+    ) {
+        // Statische Factory-Methode, die deine Default-Konstanten nutzt
+        public static EvaluationConfig createDefault() {
+            return new EvaluationConfig(
+                    123L, 100, 200, 2, 2, 2, 1, 10, 20, 20,
+                    CSL.RankingMetric.OCHIAI, CSL.Algorithm.APRIORI_FAST,
+                    0.0, 0.0, 0.0, 0.0, 0.0,
+                    "e-shop-model.xml",
+                    true, CSL.RankingMetric.OCHIAI, 0.5
             );
-        }
-
-        // --- Helper methods to analyze the output ---
-
-        private int findRankOfInjectedFault(List<CSL.ScoredInteraction> results, int[] injectedFault) {
-            // Here you implement the logic to check if the injected fault is present in the results.
-            // Remember to compare the contents of the int arrays correctly!
-            for (int i = 0; i < results.size(); i++) {
-                int[] minedInteraction = results.get(i).getInteraction().get();
-                if (isSameInteraction(minedInteraction, injectedFault)) {
-                    return i + 1; // 1-based ranking
-                }
-            }
-            return -1; // Not found
-        }
-
-        private double getScoreOfFault(List<CSL.ScoredInteraction> results, int rank) {
-            if (rank == -1 || results.isEmpty()) return 0.0;
-            return results.get(rank - 1).getOchiai(); // or whichever metric was requested
-        }
-
-        private boolean isSameInteraction(int[] a, int[] b) {
-            // Write a helper to check if arrays contain the same literals (ignoring order if necessary)
-            return false;
         }
     }
 }

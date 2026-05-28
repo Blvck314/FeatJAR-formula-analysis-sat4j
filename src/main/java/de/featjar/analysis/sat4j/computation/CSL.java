@@ -22,9 +22,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
@@ -41,6 +45,8 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
     }
 
     public enum RankingMetric {
+        PASSES,
+        FAILS,
         OCHIAI,
         GROWTH_RATE,
         DSTAR,
@@ -48,10 +54,8 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
         LIFT
     }
 
-    public static final Dependency<BooleanAssignmentList> PASSING_CONFIGS =
-            Dependency.newDependency(BooleanAssignmentList.class);
-    public static final Dependency<BooleanAssignmentList> FAILING_CONFIGS =
-            Dependency.newDependency(BooleanAssignmentList.class);
+    public static final Dependency<BooleanAssignmentList> PASSING_CONFIGS = Dependency.newDependency(BooleanAssignmentList.class);
+    public static final Dependency<BooleanAssignmentList> FAILING_CONFIGS = Dependency.newDependency(BooleanAssignmentList.class);
     public static final Dependency<BooleanAssignment> CORE_FEATURES = Dependency.newDependency(BooleanAssignment.class);
     public static final Dependency<Integer> MIN_T = Dependency.newDependency(Integer.class);
     public static final Dependency<Integer> MAX_T = Dependency.newDependency(Integer.class);
@@ -63,6 +67,9 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
     public static final Dependency<Double> MIN_DSTAR = Dependency.newDependency(Double.class);
     public static final Dependency<Double> MIN_CONFIDENCE = Dependency.newDependency(Double.class);
     public static final Dependency<Double> MIN_LIFT = Dependency.newDependency(Double.class);
+    public static final Dependency<Boolean> DO_PREFILTER = Dependency.newDependency(Boolean.class);
+    public static final Dependency<RankingMetric> PREFILTER_METRIC = Dependency.newDependency(RankingMetric.class);
+    public static final Dependency<Double> PREFILTER_THRESHOLD = Dependency.newDependency(Double.class);
 
     public CSL(IComputation<BooleanAssignmentList> clauseList, Object... computations) {
         super(
@@ -84,6 +91,9 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
                 Computations.of(0.0),
                 Computations.of(0.0),
                 Computations.of(0.0),
+                Computations.of(false),
+                Computations.of(RankingMetric.OCHIAI),
+                Computations.of(0.0),
                 computations);
     }
 
@@ -94,29 +104,43 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
     @Override
     public Result<CSLResult> compute(List<Object> dependencyList, Progress progress) {
         BooleanAssignmentList clauseList = BOOLEAN_CLAUSE_LIST.get(dependencyList);
-        BooleanAssignmentList passingConfigs = adaptVariableMap(PASSING_CONFIGS.get(dependencyList), clauseList);
-        BooleanAssignmentList failingConfigs = adaptVariableMap(FAILING_CONFIGS.get(dependencyList), clauseList);
+        BooleanAssignmentList passingConfigs = PASSING_CONFIGS.get(dependencyList);
+        BooleanAssignmentList failingConfigs = FAILING_CONFIGS.get(dependencyList);
         BooleanAssignment coreFeatures = CORE_FEATURES.get(dependencyList);
         int minT = MIN_T.get(dependencyList);
         int maxT = MAX_T.get(dependencyList);
         int minsup = MINSUP.get(dependencyList);
         int maxsup = MAXSUP.get(dependencyList);
         Algorithm algorithm = ALGORITHM.get(dependencyList);
+        boolean doPrefilter = DO_PREFILTER.get(dependencyList);
+        RankingMetric prefilterMetric = PREFILTER_METRIC.get(dependencyList);
+        double prefilterThreshold = PREFILTER_THRESHOLD.get(dependencyList);
 
+        // Check whether all parameters are set to a valid value
         Result<?> validationResult = validate(failingConfigs, minT, maxT, minsup, maxsup, algorithm);
         if (validationResult.isEmpty()) {
             return validationResult.nullify();
         }
 
+
         boolean[] coreFeatureMask = toCoreFeatureMask(coreFeatures, clauseList.getVariableMap().size());
 
-        progress.setTotalSteps(4);
+        progress.setTotalSteps(doPrefilter ? 5 : 4);
         progress.incrementCurrentStep();
         checkCancel();
 
         try {
-            MiningInput passingInput = prepareMiningInput(passingConfigs, coreFeatureMask);
-            MiningInput failingInput = prepareMiningInput(failingConfigs, coreFeatureMask);
+            Set<Integer> filteredFeatures = doPrefilter // evtl. wegen constraints mehr raushauen
+                    ? prefilterFeatures(
+                            passingConfigs, failingConfigs, coreFeatureMask, prefilterMetric, prefilterThreshold)
+                    : Collections.emptySet();
+            if (doPrefilter) {
+                progress.incrementCurrentStep();
+                checkCancel();
+            }
+
+            MiningInput passingInput = prepareMiningInput(passingConfigs, coreFeatureMask, filteredFeatures);
+            MiningInput failingInput = prepareMiningInput(failingConfigs, coreFeatureMask, filteredFeatures);
             progress.incrementCurrentStep();
             checkCancel();
 
@@ -184,8 +208,13 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
     }
 
     private MiningInput prepareMiningInput(BooleanAssignmentList configs, boolean[] coreFeatureMask) throws IOException {
+        return prepareMiningInput(configs, coreFeatureMask, Collections.emptySet());
+    }
+
+    private MiningInput prepareMiningInput(
+            BooleanAssignmentList configs, boolean[] coreFeatureMask, Set<Integer> filteredFeatures) throws IOException {
         Path inputPath = Files.createTempFile("featjar-csl-", ".transactions");
-        writeConfigsToFile(configs, inputPath, coreFeatureMask);
+        writeConfigsToFile(configs, inputPath, coreFeatureMask, filteredFeatures);
         return new MiningInput(inputPath, configs.size());
     }
 
@@ -236,7 +265,8 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
         }
     }
 
-    private void writeConfigsToFile(BooleanAssignmentList configs, Path path, boolean[] coreFeatureMask)
+    private void writeConfigsToFile(
+            BooleanAssignmentList configs, Path path, boolean[] coreFeatureMask, Set<Integer> filteredFeatures)
             throws IOException {
         try (BufferedWriter writer = Files.newBufferedWriter(path, Charset.defaultCharset())) {
             for (BooleanAssignment configuration : configs) {
@@ -244,8 +274,8 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
                         .filter(feature -> feature != 0)
                         .filter(feature -> !isCoreFeature(feature, coreFeatureMask))
                         .map(this::mapFeatureToPositiveInt)
+                        .filter(feature -> !filteredFeatures.contains(feature))
                         .distinct()
-                        .sorted()
                         .toArray();
                 String configString = Arrays.stream(features).mapToObj(String::valueOf).collect(Collectors.joining(" "));
                 writer.write(configString);
@@ -265,6 +295,93 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
 
     private int mapFeatureToFeatJARInt(int feature, int maxFeatureInt) {
         return feature > maxFeatureInt ? -(Integer.MAX_VALUE - feature) : feature;
+    }
+
+    private Set<Integer> prefilterFeatures(
+            BooleanAssignmentList passingConfigs,
+            BooleanAssignmentList failingConfigs,
+            boolean[] coreFeatureMask,
+            RankingMetric prefilterMetric,
+            double prefilterThreshold)
+            throws Exception {
+        if (prefilterThreshold <= 0.0 || Double.isNaN(prefilterThreshold)) {
+            return Collections.emptySet();
+        }
+
+        MiningInput passingInput = prepareMiningInput(passingConfigs, coreFeatureMask);
+        MiningInput failingInput = prepareMiningInput(failingConfigs, coreFeatureMask);
+        try {
+            Itemsets passingSingles = runSinglePatternMiner(passingInput);
+            Itemsets failingSingles = runSinglePatternMiner(failingInput);
+            Map<Integer, Integer> passingSupports = getSinglePatternSupports(passingSingles);
+            Map<Integer, Integer> failingSupports = getSinglePatternSupports(failingSingles);
+            Set<Integer> allFeatures = new HashSet<>(passingSupports.keySet());
+            allFeatures.addAll(failingSupports.keySet());
+
+            ContrastMetricCalculator metrics =
+                    new ContrastMetricCalculator(passingConfigs.size(), failingConfigs.size());
+            Set<Integer> filteredFeatures = new HashSet<>();
+            for (int feature : allFeatures) {
+                int passes = passingSupports.getOrDefault(feature, 0);
+                int fails = failingSupports.getOrDefault(feature, 0);
+                if (!passesPrefilterThreshold(passes, fails, metrics, prefilterMetric, prefilterThreshold)) {
+                    filteredFeatures.add(feature);
+                }
+            }
+            return filteredFeatures;
+        } finally {
+            passingInput.delete();
+            failingInput.delete();
+        }
+    }
+
+    private Itemsets runSinglePatternMiner(MiningInput input) throws Exception {
+        if (input.configCount == 0) {
+            return new Itemsets("empty");
+        }
+        return runMiner(input.path, input.configCount, 1, 1, 1, input.configCount, Algorithm.APRIORI_FAST);
+    }
+
+    private Map<Integer, Integer> getSinglePatternSupports(Itemsets itemsets) {
+        Map<Integer, Integer> supports = new HashMap<>();
+        for (List<Itemset> level : itemsets.getLevels()) {
+            for (Itemset itemset : level) {
+                if (itemset.itemset.length == 1) {
+                    supports.put(itemset.itemset[0], itemset.getAbsoluteSupport());
+                }
+            }
+        }
+        return supports;
+    }
+
+    private boolean passesPrefilterThreshold(
+            int passes,
+            int fails,
+            ContrastMetricCalculator metrics,
+            RankingMetric prefilterMetric,
+            double prefilterThreshold) {
+        return isAboveThreshold(getMetricValue(passes, fails, metrics, prefilterMetric), prefilterThreshold);
+    }
+
+    private double getMetricValue(
+            int passes, int fails, ContrastMetricCalculator metrics, RankingMetric rankingMetric) {
+        switch (rankingMetric) {
+            case PASSES:
+                return passes;
+            case FAILS:
+                return fails;
+            case GROWTH_RATE:
+                return metrics.computeGrowthRate(passes, fails);
+            case DSTAR:
+                return metrics.computeDStar(passes, fails, 2.0);
+            case CONFIDENCE:
+                return metrics.computeConfidence(passes, fails);
+            case LIFT:
+                return metrics.computeLift(passes, fails);
+            case OCHIAI:
+            default:
+                return metrics.computeOchiai(passes, fails);
+        }
     }
 
     private HashMap<InteractionKey, SupportCounts> getFailingInteractionSupports(

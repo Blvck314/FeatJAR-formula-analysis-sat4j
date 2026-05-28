@@ -73,6 +73,19 @@ public class CSLCommand extends ASAT4JAnalysisCommand<CSL.CSLResult> {
             .setDescription("Minimal lift threshold.")
             .setDefaultValue(0.0);
 
+    public static final Option<Boolean> PREFILTER_OPTION = Option.newFlag("prefilter")
+            .setDescription("Prefilter one-wise feature patterns before mining larger interactions.");
+
+    public static final Option<CSL.RankingMetric> PREFILTER_METRIC_OPTION =
+            Option.newEnumOption("prefilter-metric", CSL.RankingMetric.class)
+                    .setDescription("Metric used for one-wise feature prefiltering.")
+                    .setDefaultValue(CSL.RankingMetric.OCHIAI);
+
+    public static final Option<Double> PREFILTER_THRESHOLD_OPTION =
+            Option.newOption("prefilter-threshold", Option.DoubleParser)
+                    .setDescription("Minimal metric value for keeping a one-wise feature pattern.")
+                    .setDefaultValue(0.0);
+
     public static final Option<Integer> TOP_K_OPTION = Option.newOption("k", Option.IntegerParser)
             .setDescription("Number of top-ranked interactions to print to stdout. Use 0 to print all.")
             .setValidator(k -> k >= 0)
@@ -146,7 +159,10 @@ public class CSLCommand extends ASAT4JAnalysisCommand<CSL.CSLResult> {
                 .set(CSL.MIN_GROWTH_RATE, optionParser.get(MIN_GROWTH_RATE_OPTION))
                 .set(CSL.MIN_DSTAR, optionParser.get(MIN_DSTAR_OPTION))
                 .set(CSL.MIN_CONFIDENCE, optionParser.get(MIN_CONFIDENCE_OPTION))
-                .set(CSL.MIN_LIFT, optionParser.get(MIN_LIFT_OPTION));
+                .set(CSL.MIN_LIFT, optionParser.get(MIN_LIFT_OPTION))
+                .set(CSL.DO_PREFILTER, optionParser.get(PREFILTER_OPTION))
+                .set(CSL.PREFILTER_METRIC, optionParser.get(PREFILTER_METRIC_OPTION))
+                .set(CSL.PREFILTER_THRESHOLD, optionParser.get(PREFILTER_THRESHOLD_OPTION));
 
         loadConfigs(optionParser.getResult(FAILING_CONFIGS_OPTION))
                 .ifPresent(configs -> analysis.set(CSL.FAILING_CONFIGS, configs));
