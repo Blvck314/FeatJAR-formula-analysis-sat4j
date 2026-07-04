@@ -1,7 +1,5 @@
 package de.featjar;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
 import de.featjar.analysis.sat4j.computation.ARMTester;
 import de.featjar.analysis.sat4j.computation.CSL;
 import de.featjar.analysis.sat4j.computation.ComputeCoreSAT4J;
@@ -13,7 +11,6 @@ import de.featjar.base.FeatJAR;
 import de.featjar.base.computation.Computations;
 import de.featjar.base.io.IO;
 import de.featjar.base.data.Pair;
-import de.featjar.formula.VariableMap;
 import de.featjar.formula.assignment.BooleanAssignment;
 import de.featjar.formula.assignment.BooleanAssignmentGroups;
 import de.featjar.formula.assignment.BooleanAssignmentList;
@@ -28,9 +25,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Random;
-import org.junit.jupiter.api.Test;
 
 
 public class CSLTest {
