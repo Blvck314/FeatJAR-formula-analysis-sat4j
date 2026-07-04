@@ -53,8 +53,7 @@ public class CSLTest {
     private static final double PREFILTER_THRESHOLD = 0.5;
 
     public static void main(String[] args) throws IOException {
-        Path resourcesPath = Path.of(System.getProperty("user.home"), "Documents", "studium", "Bachelorarbeit",
-                "resources_featjar");
+        Path resourcesPath = Path.of(System.getProperty("user.home"), "studium", "Bachelorarbeit", "resources_featjar");
         Path modelPath = args.length > 0 ? Path.of(args[0]) : resourcesPath.resolve(FEATURE_MODEL);
         Path outputPath = args.length > 1 ? Path.of(args[1]) : resourcesPath.resolve("csl-generated");
         Files.createDirectories(outputPath);
