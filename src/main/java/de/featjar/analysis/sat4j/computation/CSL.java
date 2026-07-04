@@ -47,6 +47,8 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
     public enum RankingMetric {
         PASSES,
         FAILS,
+        PASSES_FAILS_SIZE,
+        PASSES_TO_FAILS_RATIO,
         OCHIAI,
         GROWTH_RATE,
         DSTAR,
@@ -611,7 +613,11 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
         }
 
         public String serializeTopK(int k, RankingMetric rankingMetric) {
-            return serialize(getTopInteractions(k, rankingMetric));
+            int limit = k <= 0 ? interactions.size() : Math.min(k, interactions.size());
+            return serialize(interactions.stream()
+                    .sorted(scoredInteractionComparator(rankingMetric))
+                    .limit(limit)
+                    .collect(Collectors.toList()));
         }
 
         private String serialize(List<ScoredInteraction> interactions) {
@@ -888,6 +894,9 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
                 case LIFT:
                     return lift;
                 case OCHIAI:
+                    return ochiai;
+                case PASSES_TO_FAILS_RATIO:
+                    return (double) passingSupport /failingSupport;
                 default:
                     return ochiai;
             }
@@ -895,6 +904,13 @@ public class CSL extends ASAT4JAnalysis.Solution<CSL.CSLResult> {
     }
 
     private static Comparator<ScoredInteraction> scoredInteractionComparator(RankingMetric rankingMetric) {
+        if (rankingMetric == RankingMetric.PASSES_FAILS_SIZE) {
+            return Comparator.comparingInt(ScoredInteraction::getPassingSupport)
+                    .thenComparing(Comparator.comparingInt(ScoredInteraction::getFailingSupport).reversed())
+                    .thenComparingInt(interaction -> interaction.getInteraction().size())
+                    .thenComparing((left, right) ->
+                            compareAssignments(left.getInteraction().get(), right.getInteraction().get()));
+        }
         return (left, right) -> {
             int scoreComparison = Double.compare(
                     normalizedScore(right.getMetric(rankingMetric)), normalizedScore(left.getMetric(rankingMetric)));

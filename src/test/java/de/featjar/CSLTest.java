@@ -1,5 +1,7 @@
 package de.featjar;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import de.featjar.analysis.sat4j.computation.ARMTester;
 import de.featjar.analysis.sat4j.computation.CSL;
 import de.featjar.analysis.sat4j.computation.ComputeCoreSAT4J;
@@ -11,6 +13,7 @@ import de.featjar.base.FeatJAR;
 import de.featjar.base.computation.Computations;
 import de.featjar.base.io.IO;
 import de.featjar.base.data.Pair;
+import de.featjar.formula.VariableMap;
 import de.featjar.formula.assignment.BooleanAssignment;
 import de.featjar.formula.assignment.BooleanAssignmentGroups;
 import de.featjar.formula.assignment.BooleanAssignmentList;
@@ -25,12 +28,14 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Random;
+import org.junit.jupiter.api.Test;
 
 
 public class CSLTest {
 
-    private static final long SEED = 123L;
+    private static final long SEED = 1234L;
     private static final int RANDOM_SAMPLE_SIZE = 100;
     private static final int YASA_SAMPLE_SIZE = 200;
     private static final int YASA_T = 2;
@@ -40,7 +45,7 @@ public class CSLTest {
     private static final int CSL_MAXSUP = 10;
     private static final int MAX_SIMULATION_ATTEMPTS = 20;
     private static final int TOP_K = 20;
-    private static final CSL.RankingMetric RANKING_METRIC = CSL.RankingMetric.OCHIAI;
+    private static final CSL.RankingMetric RANKING_METRIC = CSL.RankingMetric.PASSES_FAILS_SIZE;
     private static final CSL.Algorithm ALGORITHM = CSL.Algorithm.APRIORI_FAST;
     private static final double MIN_OCHIAI = 0.0;
     private static final double MIN_DSTAR = 0.0;
@@ -49,11 +54,12 @@ public class CSLTest {
     private static final double MIN_LIFT = 0.0;
     private static final String FEATURE_MODEL = "e-shop-model.xml";
     private static final boolean DO_PREFILTERING = true;
-    private static final CSL.RankingMetric PREFILTER_METRIC = CSL.RankingMetric.OCHIAI;
+    private static final CSL.RankingMetric PREFILTER_METRIC = CSL.RankingMetric.PASSES_TO_FAILS_RATIO;
     private static final double PREFILTER_THRESHOLD = 0.5;
 
+
     public static void main(String[] args) throws IOException {
-        Path resourcesPath = Path.of(System.getProperty("user.home"), "Documents", "studium", "Bachelorarbeit",
+        Path resourcesPath = Path.of(System.getProperty("user.home"), "studium", "Bachelorarbeit",
                 "resources_featjar");
         Path modelPath = args.length > 0 ? Path.of(args[0]) : resourcesPath.resolve(FEATURE_MODEL);
         Path outputPath = args.length > 1 ? Path.of(args[1]) : resourcesPath.resolve("csl-generated");
@@ -128,7 +134,7 @@ public class CSLTest {
             long attemptSeed = SEED + attempt;
             tester = new ARMTester(attemptSeed, featureModelClauses, updater, coreFeatures, sample);
             boolean[] includedLiterals = randomSigns(INTERACTION_SIZE, attemptSeed);
-            tester.simulateInteractionWithRandomFeatures(ARMTester.InteractionType.AND, includedLiterals);
+            tester.simulateInteractionWithRandomFeatures(ARMTester.InteractionType.IMPLIES, includedLiterals);
             testedSample = tester.testSample(sample);
             if (!testedSample.getSecond().isEmpty()) {
                 break;
